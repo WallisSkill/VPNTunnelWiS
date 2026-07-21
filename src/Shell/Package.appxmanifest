@@ -1,0 +1,65 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities" IgnorableNamespaces="uap rescap">
+  <Identity Name="FortiGateSslVpn.Plugin" Publisher="CN=FortiVpnPluginDev" Version="0.2.0.19" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>FortiGate SSL-VPN</DisplayName>
+    <PublisherDisplayName>local</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Applications>
+    <Application Id="App" Executable="FortiVpnHost.exe" EntryPoint="FortiVpnPlugin.App">
+      <uap:VisualElements DisplayName="FortiGate SSL-VPN" Description="FortiOS SSL-VPN provider" BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <!-- How Windows finds the provider at all. The type must be uap:vpnClient:
+             "general" packages just as happily but registers an ordinary background
+             task, so the app never joins the VPN provider list and dialling dies with
+             error 876 and a blank app name.
+
+             ServerName stays even though no out-of-process server is declared below.
+             A vpnClient task is refused at deployment without one, and the platform
+             is satisfied by the name alone. -->
+        <Extension Category="windows.backgroundTasks" EntryPoint="FortiVpnPlugin.FortiPlugin">
+          <BackgroundTasks ServerName="FortiVpnServer">
+            <uap:Task Type="vpnClient" />
+          </BackgroundTasks>
+        </Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <!-- Package-level, NOT inside <Application>: the schema only allows background task
+       categories there.
+
+       One in-process registration and nothing else. A class may not be registered both
+       in-process and out-of-process (deployment answers 0x800700A0), and the earlier
+       attempt at an out-of-process server for this same class is what left the platform
+       waiting for a registration that never came, timing out with 0x8027025A.
+
+       Path is the native shim rather than WinRT.Host.dll from CsWinRT: the stock host
+       answers every DllGetActivationFactory with 0x80008093 without ever starting a
+       runtime, which the platform reports as the far less helpful 0x80073CFC. The shim
+       drives hostfxr by hand, and that works. -->
+  <Extensions>
+    <Extension Category="windows.activatableClass.inProcessServer">
+      <InProcessServer>
+        <Path>FortiVpnShim.dll</Path>
+        <ActivatableClass ActivatableClassId="FortiVpnPlugin.FortiPlugin" ThreadingModel="both" />
+      </InProcessServer>
+    </Extension>
+  </Extensions>
+  <Capabilities>
+    <!-- networkingVpnProvider is the capability that grants VPN rights. It belongs to
+         capabilityClass_DevUnlock, so a dev-unlocked machine grants it without an
+         administrator. packagedVpnPlugin appears in some docs but is in no capability
+         class on this build, so Windows drops it silently; do not add it back
+         expecting anything. -->
+    <rescap:Capability Name="networkingVpnProvider" />
+    <Capability Name="internetClientServer" />
+    <Capability Name="privateNetworkClientServer" />
+  </Capabilities>
+</Package>

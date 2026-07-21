@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Console, not WinExe: this executable is the registration tool the user runs,
+         and it has to be able to report what happened. RasMan never launches it: the
+         plugin class is activated in-process through WinRT.Host.dll. -->
+    <OutputType>Exe</OutputType>
+    <RootNamespace>FortiVpnPlugin</RootNamespace>
+    <!-- Must match Application/@Executable in Package.appxmanifest. Deliberately
+         NOT "FortiVpnPlugin": that name belongs to the component assembly, and two
+         projects emitting FortiVpnPlugin.dll would collide in the package root. -->
+    <AssemblyName>FortiVpnHost</AssemblyName>
+    <UseUwp>true</UseUwp>
+    <AppxPackage>true</AppxPackage>
+    <SelfContained>true</SelfContained>
+    <Nullable>enable</Nullable>
+    <!-- ComServer hands raw function pointers to RoRegisterActivationFactories. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Plugin\Plugin.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AppxManifest Include="Package.appxmanifest" />
+    <Content Include="Assets\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

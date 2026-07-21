@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>TunnelProbe</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Linked, not copied: the framing code now lives with the plugin, and the probe
+         is what proves it against the real gateway. Two copies would drift. -->
+    <Compile Include="..\..\src\Plugin\Ppp.cs" Link="Ppp.cs" />
+  </ItemGroup>
+</Project>
