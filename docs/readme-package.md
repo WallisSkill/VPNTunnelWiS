@@ -23,6 +23,10 @@ Unpack, then run this from the folder you unpacked into:
 
 The script creates no connection. It only registers the provider.
 
+There is also a single `FortiVpnSetup-<version>.exe` on the release page that does all of
+the above by itself — no unpacking and no PowerShell. Run it with `/remove` to uninstall.
+This zip exists for anyone who would rather see the scripts before running them.
+
 ## Creating a connection
 
 1. Settings > Network & internet > VPN > **Add VPN**

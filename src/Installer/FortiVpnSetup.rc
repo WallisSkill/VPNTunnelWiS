@@ -1,0 +1,9 @@
+// Paths here are resolved relative to this .rc file, not to the working directory.
+
+// The package layout, zipped: what makes the installer a single file. installer.ps1
+// produces it from dist\ before rc.exe is ever run.
+PAYLOAD RCDATA "build\\payload.zip"
+
+// 1 is CREATEPROCESS_MANIFEST_RESOURCE_ID, 24 is RT_MANIFEST. See the manifest itself
+// for why an installer named "setup" cannot go without one.
+1 24 "FortiVpnSetup.manifest"

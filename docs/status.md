@@ -149,10 +149,11 @@ Ca bon deu cho ra cung mot trieu chung: tunnel bao Connected ma khong tai gi.
 
 ## Cai dat
 
-    powershell -ExecutionPolicy Bypass -File build.ps1     # dung dist\
-    powershell -ExecutionPolicy Bypass -File install.ps1   # dang ky provider
+    powershell -ExecutionPolicy Bypass -File build.ps1      # dung dist\
+    powershell -ExecutionPolicy Bypass -File install.ps1    # dang ky provider
     powershell -ExecutionPolicy Bypass -File uninstall.ps1
-    powershell -ExecutionPolicy Bypass -File package.ps1   # out\FortiVpnPlugin-<ver>.zip
+    powershell -ExecutionPolicy Bypass -File package.ps1    # out\FortiVpnPlugin-<ver>.zip
+    powershell -ExecutionPolicy Bypass -File installer.ps1  # out\FortiVpnSetup-<ver>.exe
 
 `install.ps1` khong tao ket noi nao. No chi dang ky package de "FortiGate SSL-VPN" hien
 ra trong danh sach VPN provider; nguoi dung tu them ket noi trong Settings, va plugin
@@ -166,5 +167,19 @@ LocalMachine\Root, ma viec do can admin. Layout dang ky truc tiep thi khong.
 
 `package.ps1` gop `dist\` + hai script + `docs\readme-package.md` thanh mot zip (~42 MB)
 dua cho may khac dung duoc nguyen ven, khong tai them gi.
+
+`installer.ps1` ra mot file `.exe` duy nhat (~42 MB) mang nguyen `dist\` da nen ben trong
+lam resource. No lam dung viec cua `install.ps1` nhung khong can PowerShell o dau kia. Ba
+cho dang ghi nho:
+
+- Giai nen bang `tar.exe` co san trong System32 tu Windows 10 1803 -- doc duoc zip, nen
+  khong phai mang theo bo giai nen nao. Package doi toi thieu 10.0.19041 nen chac chan co.
+- **Phai nhung manifest `asInvoker`.** Windows doan mot file `.exe` khong co manifest ma
+  ten co chu "setup" la trinh cai dat va doi nang quyen -- dung cai duy nhat ca goi nay
+  sinh ra de tranh.
+- Link `/MT`. Mot trinh cai dat doi cai VC++ redistributable truoc moi chay duoc thi vo
+  nghia voi nguoi khong co admin.
+- Dang ky bang `PackageManager.RegisterPackageAsync` voi `DeploymentOptions::DevelopmentMode`,
+  dung thu ma `Add-AppxPackage -Register` goi ben duoi.
 
 Dieu kien duy nhat: Developer Mode bat.

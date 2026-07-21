@@ -38,6 +38,9 @@ jobs:
       - name: Package
         run: powershell -ExecutionPolicy Bypass -File package.ps1
 
+      - name: Installer
+        run: powershell -ExecutionPolicy Bypass -File installer.ps1
+
       - name: Read the version out of the manifest
         id: version
         shell: pwsh
@@ -48,7 +51,30 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: FortiVpnPlugin-${{ steps.version.outputs.version }}
-          path: out/*.zip
+          path: |
+            out/*.exe
+            out/*.zip
+
+      # Written as a file rather than passed to --notes: markdown full of backticks and
+      # asterisks does not survive being a PowerShell argument, and a YAML block scalar
+      # carries it through untouched.
+      - name: Write the release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          cat > release-notes.md <<'NOTES'
+          Download **FortiVpnSetup-VERSION.exe** and run it. That is the whole install:
+          no unpacking, no PowerShell, no administrator. Run it again with `/remove` to
+          uninstall.
+
+          The `.zip` is the same layout for anyone who would rather run `install.ps1`
+          themselves.
+
+          Either way **Developer Mode** has to be on (Settings > System > For developers).
+          That is what lets Windows register an unsigned package, and turning it on does
+          not need an administrator either.
+          NOTES
+          sed -i "s/VERSION/${{ steps.version.outputs.version }}/g" release-notes.md
 
       # Only when a tag was pushed. gh is preinstalled on the runner, so no third-party
       # action gets a token here.
@@ -58,7 +84,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $zip = (Get-ChildItem out\*.zip | Select-Object -First 1).FullName
-          gh release create $env:GITHUB_REF_NAME $zip `
+          # The .exe first, so it is the asset listed at the top of the release.
+          $assets = @(Get-ChildItem out\*.exe, out\*.zip | ForEach-Object FullName)
+          gh release create $env:GITHUB_REF_NAME @assets `
             --title $env:GITHUB_REF_NAME `
-            --notes "Package version ${{ steps.version.outputs.version }}. Unpack and run install.ps1; Developer Mode must be on. See docs/readme-package.md."
+            --notes-file release-notes.md
