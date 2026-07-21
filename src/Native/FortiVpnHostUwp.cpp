@@ -104,9 +104,9 @@ int __stdcall wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     }
     catch (hresult_error const& e)
     {
-        Trace(L"CoreApplication::Run nem: " + std::wstring(e.message()));
+        Trace(L"CoreApplication::Run threw: " + std::wstring(e.message()));
         return static_cast<int>(e.code());
     }
-    Trace(L"thoat binh thuong");
+    Trace(L"exited normally");
     return 0;
 }

@@ -39,7 +39,7 @@ await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
     TargetHost = Host,
     EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
 });
-Console.WriteLine($"TLS {tls.SslProtocol} toi {Host}:{Port}");
+Console.WriteLine($"TLS {tls.SslProtocol} to {Host}:{Port}");
 
 var cookie = "";
 var buffered = new List<byte>();   // bytes read past the end of the previous response
@@ -128,7 +128,7 @@ string Hidden(string name)
 
 Console.Write("Username: ");
 var user = Console.ReadLine() ?? "";
-Console.Write("Password (khong hien thi): ");
+Console.Write("Password (not echoed): ");
 var pw = new StringBuilder();
 while (true)
 {
@@ -150,7 +150,7 @@ var (loginHdr, loginBody) = await Send("POST", "/remote/logincheck", form);
 // Two shapes mean success: the ajax form "ret=1,redir=..." and a plain HTML redirect to
 // the portal. Only an error page means the credentials were rejected.
 var ok = loginBody.Contains("ret=1") || loginBody.Contains("/sslvpn/portal.html");
-Console.WriteLine($"  {(ok ? "dang nhap OK" : "dang nhap THAT BAI")}: {loginBody.Trim().Replace("\n", " ")}");
+Console.WriteLine($"  {(ok ? "login OK" : "login FAILED")}: {loginBody.Trim().Replace("\n", " ")}");
 foreach (var line in loginHdr.Split("\r\n").Where(l => l.StartsWith("Set-Cookie", StringComparison.OrdinalIgnoreCase)))
     Console.WriteLine($"  hdr: {Regex.Replace(line, @"=([^;]{4})[^;]*", "=$1...")}");
 if (!ok) return;
@@ -160,7 +160,7 @@ TakeCookie(loginHdr);
 var redir = Regex.Match(loginBody, @"redir=(\S+)");
 if (redir.Success)
 {
-    Console.WriteLine("\n=== 3. GET host check (lay SVPNCOOKIE that) ===");
+    Console.WriteLine("\n=== 3. GET host check (fetches the real SVPNCOOKIE) ===");
     var (hcHdr, _) = await Send("GET", redir.Groups[1].Value.Trim());
     TakeCookie(hcHdr);
 }
@@ -170,7 +170,7 @@ else
     var (pHdr, _) = await Send("GET", "/sslvpn/portal.html");
     TakeCookie(pHdr);
 }
-if (cookie.Length == 0) { Console.WriteLine("  khong lay duoc SVPNCOOKIE"); return; }
+if (cookie.Length == 0) { Console.WriteLine("  no SVPNCOOKIE was obtained"); return; }
 Console.WriteLine($"  SVPNCOOKIE OK (len={cookie.Length})");
 
 // The gateway will not hand out a tunnel until the session has actually been
@@ -249,7 +249,7 @@ async Task SendIpcpReq()
     }
     var pkt = new CtrlPacket(1, ipcpId, Opt.Concat(parts.ToArray()));
     await SendFrame(Proto.Ipcp, pkt,
-        $"IP={string.Join(".", wantIp)}{(offerDns ? "" : ", khong hoi DNS")}");
+        $"IP={string.Join(".", wantIp)}{(offerDns ? "" : ", not asking for DNS")}");
 }
 
 var buf = new byte[16384];
@@ -259,13 +259,13 @@ try
     while (!deadline.IsCancellationRequested)
     {
         var n = await tls.ReadAsync(buf, deadline.Token);
-        if (n == 0) { Console.WriteLine("  server dong ket noi"); break; }
+        if (n == 0) { Console.WriteLine("  server closed the connection"); break; }
         rx.AddRange(buf.AsSpan(0, n).ToArray());
 
         var frames = FortiFrame.Deframe(rx, out var frameError);
         if (frameError is not null)
         {
-            Console.WriteLine($"\n  LOI KHUNG: {frameError}");
+            Console.WriteLine($"\n  FRAMING ERROR: {frameError}");
             foreach (var i in Enumerable.Range(0, Math.Min(4, (rx.Count + 15) / 16)).Select(k => k * 16))
                 Console.WriteLine($"  {i:X4}  {string.Join(" ", rx.Skip(i).Take(16).Select(x => x.ToString("X2")))}");
             break;
@@ -276,7 +276,7 @@ try
             var pkt = CtrlPacket.Parse(payload);
             if (pkt is null)
             {
-                Console.WriteLine($"  <- {Proto.Name(proto)} {payload.Length} bytes du lieu");
+                Console.WriteLine($"  <- {Proto.Name(proto)} {payload.Length} bytes of data");
                 continue;
             }
 
@@ -291,7 +291,7 @@ try
                 switch (pkt.Code)
                 {
                     case 1:     // peer's Configure-Request: accept it wholesale
-                        await SendFrame(Proto.Lcp, pkt with { Code = 2 }, "chap nhan");
+                        await SendFrame(Proto.Lcp, pkt with { Code = 2 }, "accepted");
                         lcpPeerAcked = true;
                         break;
                     case 2:
@@ -300,7 +300,7 @@ try
                     case 3 or 4: // Nak/Reject: drop what it disliked and retry
                         await SendFrame(Proto.Lcp,
                             new CtrlPacket(1, (byte)(pkt.Id + 1), Opt.Tlv(Opt.MagicNumber, magic)),
-                            "rut gon sau Nak/Reject");
+                            "trimmed down after Nak/Reject");
                         break;
                     case 9:     // Echo-Request
                         await SendFrame(Proto.Lcp, pkt with { Code = 10 }, "");
@@ -312,13 +312,13 @@ try
                 switch (pkt.Code)
                 {
                     case 1:
-                        await SendFrame(Proto.Ipcp, pkt with { Code = 2 }, "chap nhan");
+                        await SendFrame(Proto.Ipcp, pkt with { Code = 2 }, "accepted");
                         break;
                     case 2:
-                        Console.WriteLine("\n  >>> IPCP LEN ROI. Dia chi da duoc cap:");
+                        Console.WriteLine("\n  >>> IPCP IS UP. Addresses assigned:");
                         foreach (var (t, v) in opts)
                             Console.WriteLine($"        {Opt.IpcpName(t)}: {string.Join(".", v)}");
-                        Console.WriteLine("\n  >>> TUNNEL HOAT DONG. Lop PPP da xong.");
+                        Console.WriteLine("\n  >>> TUNNEL IS WORKING. The PPP layer is done.");
                         return;
                     case 3:     // Nak carries the values the gateway wants us to use
                         foreach (var (t, v) in opts)
@@ -343,14 +343,14 @@ try
         if (lcpOursAcked && lcpPeerAcked && !ipcpSent)
         {
             ipcpSent = true;
-            Console.WriteLine("\n  >>> LCP LEN ROI. Chuyen sang IPCP de xin IP + DNS.");
+            Console.WriteLine("\n  >>> LCP IS UP. Moving to IPCP to ask for IP + DNS.");
             await SendIpcpReq();
         }
     }
 }
 catch (OperationCanceledException)
 {
-    Console.WriteLine($"\n  het 30 giay. Con {rx.Count} bytes chua ghep duoc thanh khung:");
+    Console.WriteLine($"\n  30 seconds elapsed. {rx.Count} bytes left that never formed a frame:");
     foreach (var i in Enumerable.Range(0, (rx.Count + 15) / 16).Select(k => k * 16))
     {
         var len = Math.Min(16, rx.Count - i);

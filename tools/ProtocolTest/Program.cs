@@ -53,7 +53,7 @@ Console.WriteLine($"  magic='{magic}' reqid='{reqid}' grpid='{grpid}' realm='{re
 Console.Write("\nUsername: ");
 var user = Console.ReadLine() ?? "";
 
-Console.Write("Password (khong hien thi): ");
+Console.Write("Password (not echoed): ");
 var pw = new StringBuilder();
 while (true)
 {
@@ -90,10 +90,10 @@ string cookieValue = "";
 
 void HarvestCookies(HttpResponseMessage r, string label)
 {
-    Console.WriteLine($"\n  Set-Cookie tu {label} (chi ten, khong in gia tri):");
+    Console.WriteLine($"\n  Set-Cookie from {label} (names only, values never printed):");
     if (!r.Headers.TryGetValues("Set-Cookie", out var scs))
     {
-        Console.WriteLine("    (khong co)");
+        Console.WriteLine("    (none)");
         return;
     }
     foreach (var sc in scs)
@@ -127,7 +127,7 @@ var redirMatch = Regex.Match(body, @"redir=(\S+)");
 if (redirMatch.Success)
 {
     var redirUrl = redirMatch.Groups[1].Value.Trim();
-    Console.WriteLine("\n=== step 2b: theo redirect sau login ===");
+    Console.WriteLine("\n=== step 2b: following the post-login redirect ===");
     Console.WriteLine($"  GET {redirUrl}");
     var hc = await http.GetAsync(redirUrl);
     var hcBody = await hc.Content.ReadAsStringAsync();
@@ -152,7 +152,7 @@ if (string.IsNullOrEmpty(cookieValue))
 
 if (string.IsNullOrEmpty(cookieValue))
 {
-    Console.WriteLine("\n  -> Van chua co SVPNCOOKIE that su nao.");
+    Console.WriteLine("\n  -> Still no real SVPNCOOKIE at all.");
     return;
 }
 Console.WriteLine($"\n  -> SVPNCOOKIE OK (len={cookieValue.Length}, masked: {cookieValue[..4]}...{cookieValue[^4..]})");
@@ -161,15 +161,15 @@ Console.WriteLine($"\n=== step 3: GET /remote/fortisslvpn_xml (tunnel config) ==
 try
 {
     var xml = await http.GetStringAsync("/remote/fortisslvpn_xml");
-    Console.WriteLine(xml.Length > 3000 ? xml[..3000] + "\n  ...(cat bot)" : xml);
+    Console.WriteLine(xml.Length > 3000 ? xml[..3000] + "\n  ...(truncated)" : xml);
 }
 catch (Exception ex)
 {
-    Console.WriteLine($"  loi: {ex.Message}");
+    Console.WriteLine($"  error: {ex.Message}");
 }
 
-Console.WriteLine($"\n=== step 4: GET /remote/network (chuyen sang tunnel mode) ===");
-Console.WriteLine("  Buoc nay bien ket noi thanh luong PPP. Chi kiem tra header roi dung.");
+Console.WriteLine($"\n=== step 4: GET /remote/network (switch to tunnel mode) ===");
+Console.WriteLine("  This step turns the connection into a PPP stream. It only checks the headers, then stops.");
 using var req = new HttpRequestMessage(HttpMethod.Get, "/remote/network");
 var netResp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
 Console.WriteLine($"  HTTP {(int)netResp.StatusCode}");

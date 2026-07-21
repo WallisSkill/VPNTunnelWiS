@@ -59,7 +59,7 @@ internal static class FortiFrame
             // HTTP error here instead of a packet, which is worth naming precisely.
             if (head[0] == 'H' && head[1] == 'T' && head[2] == 'T' && head[3] == 'P')
             {
-                error = "gateway tra ve HTTP thay vi goi tin -- tunnel mode co the bi tat cho tai khoan nay";
+                error = "the gateway returned HTTP instead of a packet -- tunnel mode may be disabled for this account";
                 return frames;
             }
 
