@@ -72,6 +72,14 @@ Ca bon deu cho ra cung mot trieu chung: tunnel bao Connected ma khong tai gi.
   voi `isRetry: true`. Nhung dang retry khong phai luc nao cung co: quay bang `rasdial`
   kem san tai khoan thi no nem `0x80070032` (ERROR_NOT_SUPPORTED), nen phai fallback ve
   dang thuong chu khong duoc de hong ca cuoc goi.
+- **Co `_credentialRejected` phai duoc *tieu thu*, khong duoc de dung mai.** "Retry" la
+  lenh cho dung mot cuoc quay so. De `static` va khong ha xuong thi no song lau hon cai
+  loi go nham da dat no len: moi cuoc quay so sau do trong cung tien trinh deu xin voi
+  `isRetry: true`, ma dang do **vut ca cache di** -- ke ca tai khoan/mat khau nguoi dung
+  da dien san o Settings > Add VPN va duoc giu lai nho `RememberCredentials`. Doc ra
+  thanh "ban SSL khong cho dien san tai khoan, lan nao cung bat go lai": no co cho dien,
+  va chinh cho nay vut di. Nay `FetchCredentials` doc va ha co trong cung mot buoc
+  `Interlocked` -- dung mot lan retry, roi ve lai cache.
 - Bat tay co han 25 giay. Khong co han thi mot gateway bat tay TLS xong roi im lang
   (dung kieu FortiOS chan nguon da sai mat khau vai lan) se treo luon thread trong mot
   lenh doc, va nguoi dung chi thay "timeout" khong ly do.
@@ -115,6 +123,33 @@ Ca bon deu cho ra cung mot trieu chung: tunnel bao Connected ma khong tai gi.
   90 giay moi. Moi deferral chi duoc `Complete` mot lan (lop `Activation` giu co
   `Interlocked`), va **dung activation bi huy** moi duoc tra deferral cua no -- tra nham
   cua thang khac la de lai mot cai huy khong ai dap, tuc la mat tien trinh.
+
+  6. **Va luan phien theo dong ho cung chua du: khong duoc giu hold qua luc tunnel ranh.**
+     Do duoc trong mot phien that: bo dem dung yen o `sent=451999 received=555016` suot
+     50 phut, kem hai lan `ExecutionTimeExceeded` luc 23:13:18 va 23:41:18. Trinh tu:
+
+         22:58:20  mot activation nhan hold, dat timer 60 giay
+                   container bi dinh chi -- timer dong bang theo
+         23:13:01  container thuc lai (heartbeat chay lai), da giu ~14,7 phut
+         23:13:18  ExecutionTimeExceeded
+
+     `System.Threading.Timer` **khong chay khi container bi dinh chi**, nhung 90 giay cua
+     platform la **wall-clock**. Nen hold nao roi vao mot lan dinh chi la chac chan vuot
+     han, va thu doc dong ho luc thuc day cung vo ich: den luc do platform da huy tu lau.
+
+     Vong luan quan lam no tu duy tri: tunnel chet -> khong co goi -> khong co activation
+     -> khong ai nhan hold -> container ngu -> tunnel cang chet.
+
+     Nen hold chi duoc nhan va giu **khi duong du lieu con chay**. Im qua 30 giay thi tha
+     ra, cho container ngu ma **khong no deferral** nao. Danh doi la do tre cua goi gui ra
+     dau tien sau luc ranh (goi gui ra danh thuc container); doi lai la khong bao gio gap
+     `ExecutionTimeExceeded` nua -- ma cai do giet duong du lieu cua channel trong ca doi
+     tien trinh, khong cuu duoc. Ngu duoc thi tinh lai; bi huy thi phai ha tien trinh.
+
+     Timer xoay doi tu one-shot sang **dinh ky 5 giay va tu doc lai wall-clock**, vi mot
+     one-shot do bang thoi gian tien trinh khong bao gio den han sau mot lan dinh chi.
+     `heartbeat` nay in kem `idle=` -- bo dem dung yen mot minh khong noi duoc tunnel dang
+     ranh hay dang ket.
 - **Heartbeat la den bao.** Mot dong moi 10 giay. Im lang trong log khi tunnel dang len
   nghia la container da ngu -- dau hieu duy nhat nhin thay duoc tu ben trong. Kem theo la
   `rotating the hold` moi 60 giay; thay du ca hai va `received=` van tang la tunnel lanh.
@@ -146,6 +181,37 @@ Ca bon deu cho ra cung mot trieu chung: tunnel bao Connected ma khong tai gi.
 - Dong dau tien cua `Connect` phai la mot dong log, truoc ca khi doc profile. Doc
   `channel.Configuration` cung la mot loi goi nguoc ve platform, nen neu treo o do thi log
   in sau no khong bao gio hien, va nham y het voi "platform khong he goi Connect".
+- **`ProcessEventAsync` phai duoc dua doi tuong da phuc vu `Connect`, khong phai `this`.**
+  Platform dung **mot `FortiPlugin` moi cho moi activation** -- danh so ra thi mot cuoc
+  ket noi roi ngat di qua `obj#1`, `obj#2`, `obj#3`, `obj#4`. Channel thuoc ve doi tuong
+  da phuc vu `Connect` (`obj#1`); dua cho `ProcessEventAsync` mot doi tuong la thi su kien
+  toi noi nhung khong dispatch duoc di dau.
+
+  Trieu chung khong he giong nguyen nhan: nguoi dung thay **"Disconnecting" dung 15 giay**,
+  lan nao cung the. `Disconnect` khong bao gio duoc goi, va vi khong ai bao plugin biet
+  nen cung khong co gi trong log de lan. Do bang ETW provider
+  `Microsoft-Windows Networking VPN Plugin Platform`
+  (`{E5FC4A0F-7198-492F-9B0F-88FDCBFDED48}`) moi thay day du:
+
+      00:51:52.403  platform  2002 "Disconnect"
+      00:51:52.404  platform  2022 bat dau
+      00:51:52.424  plugin    Run activation 7 -- su kien CO toi
+      00:51:52.425  plugin    ProcessEventAsync tra ve sau 1ms, khong dispatch
+      00:52:07.449  platform  2023 -- bo cuoc sau 15.045 giay
+
+  15 giay do la **timeout cua platform**, khong phai cong viec that. RAS ghi nhan ngat sau
+  0,13 giay; toan bo phan con lai la platform ngoi cho mot `Disconnect` khong bao gio den.
+  Sau khi luon dua `obj#1`: `Disconnect` chay het **0 ms**, RAS ghi nhan sau **24 ms**.
+
+  Ba huong da duoi va deu sai, ghi lai de khoi duoi lai: (1) plugin giu deferral lam
+  platform khong thu hoi duoc -- cat hold tu 31 giay xuong 5,6 giay, dong ho khong nhuc
+  nhich; (2) giao dien Settings hien cham chu ket noi da dut -- `rasdial /disconnect` cung
+  dung 15,08 giay; (3) trigger details khong project duoc (`WinRT.IInspectable`) -- chinh
+  duong `Connect` chay duoc cung in ra kieu do.
+
+  Bai hoc chung: moi field trong `FortiPlugin` da phai `static` **chinh vi** doi tuong bi
+  dung moi lien tuc. Cai bi bo sot la `ProcessEventAsync` nhan doi tuong chu khong nhan
+  state, nen `static` khong cuu duoc no.
 
 ## Cai dat
 

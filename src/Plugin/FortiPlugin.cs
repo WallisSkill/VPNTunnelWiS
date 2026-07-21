@@ -35,8 +35,22 @@ namespace FortiVpnPlugin
             // times a minute. The first few are what matter -- they show the dial -- and after
             // that one line every thousand is enough to prove activations are still arriving.
             var activation = System.Threading.Interlocked.Increment(ref _activations);
-            var loud = activation <= 8;
-            if (loud) Trace($"IBackgroundTask.Run {taskInstance.TriggerDetails?.GetType().Name}");
+
+            // Loud again once the data plane goes quiet, because the fifteen seconds a
+            // disconnect takes are fifteen seconds this log could not see: traffic stops the
+            // moment the user clicks, the activation counter is long past eight by then, and
+            // every activation the platform delivers during the teardown fell in the gap
+            // between "first eight" and "every thousandth". Whether the platform activates
+            // this task at all while Windows tears the tunnel down is the one fact that says
+            // if the wait is ours to fix, and it has never once been recorded.
+            //
+            // Quiet is the right trigger rather than a flag, because nothing tells the plugin
+            // a disconnect has started -- no Disconnect call and no cancel has ever arrived.
+            // Silence is the only signal available. It costs a handful of lines on a merely
+            // idle tunnel and nothing at all on a busy one.
+            var loud = activation <= 8 || SinceLastPacket >= TimeSpan.FromSeconds(2);
+            if (loud) Trace($"IBackgroundTask.Run obj#{_instanceId} {taskInstance.TriggerDetails?.GetType().FullName ?? "<null>"} " +
+                            $"(activation {activation}, idle={SinceLastPacket.TotalSeconds:0.0}s)");
             else if (activation % 1000 == 0) Trace($"activation {activation}");
 
             var activationState = new Activation(taskInstance.GetDeferral());
@@ -47,13 +61,34 @@ namespace FortiVpnPlugin
             // the host process terminated, RAS 829, the live tunnel gone with it.
             taskInstance.Canceled += (_, reason) =>
             {
-                Trace($"background task cancelled: {reason}");
+                // The state alongside the reason, because this is the one line that can say
+                // what a disconnect actually does to this plugin. If a cancel arrives here
+                // with the tunnel still live and the session still open, then the platform
+                // is tearing the tunnel down without ever calling Disconnect -- and the wait
+                // the user sees is the platform's timeout, not our teardown.
+                Trace($"background task cancelled: {reason} " +
+                      $"(tunnelLive={_tunnelLive} session={(_session is null ? "none" : "open")} " +
+                      $"sent={_sent} received={_received})");
                 activationState.Finish();
             };
 
             try
             {
-                VpnChannel.ProcessEventAsync(this, taskInstance.TriggerDetails);
+                // Canonical rather than this, because the platform builds a new FortiPlugin
+                // for every activation -- obj#1, obj#2, obj#3, obj#4 in a single connect and
+                // disconnect -- and the channel belongs to whichever object serviced Connect.
+                // Handing ProcessEventAsync a stranger is the one anomaly that fits every
+                // measurement: the disconnect event arrives, dispatch finds nothing to call,
+                // Disconnect is never entered, and the platform waits out a fifteen second
+                // timeout before tearing the tunnel down itself.
+                //
+                // Every field in this class is already static for the same reason, so passing
+                // the first object costs nothing -- it carries no state the others lack.
+                var canonical = System.Threading.Interlocked.CompareExchange(ref _canonical, this, null) ?? this;
+                if (loud && !ReferenceEquals(canonical, this))
+                    Trace($"  dispatching on obj#{canonical._instanceId} instead of obj#{_instanceId}");
+
+                VpnChannel.ProcessEventAsync(canonical, taskInstance.TriggerDetails);
                 // Logged on the way out as well as the way in. An activation that dispatches
                 // nothing at all looks exactly like one that hung inside a handler unless the
                 // return is recorded, and both have been seen here.
@@ -86,7 +121,15 @@ namespace FortiVpnPlugin
                 // execution-time cancel is never reached. Releasing it makes the platform go
                 // back to activating per packet, and the very next packet hands the hold to a
                 // fresh activation with a fresh ninety seconds.
-                if (!_tunnelLive ||
+                // And the hold is only worth taking while the tunnel is actually carrying
+                // something. Taking it through an idle spell is what produced the failure
+                // this guard exists for: the container slept while owing a deferral, the
+                // rotation timer slept with it, and the platform's ninety wall-clock seconds
+                // ran out unattended -- ExecutionTimeExceeded, and with it a channel that
+                // never carried another packet in that host process. An idle tunnel that
+                // sleeps owing nothing gives up latency on the next outbound packet and
+                // keeps the data path.
+                if (!_tunnelLive || SinceLastPacket >= IdleBeforeSleep ||
                     System.Threading.Interlocked.CompareExchange(ref _hold, activationState, null) is not null)
                 {
                     activationState.Finish();
@@ -119,9 +162,54 @@ namespace FortiVpnPlugin
             /// channel's data path for the rest of the process -- never arrives.
             /// </summary>
             public void HoldUntilRotation()
-                => _rotation = new System.Threading.Timer(
-                    _ => { Trace("rotating the hold"); Finish(); },
-                    null, RotationInterval, System.Threading.Timeout.InfiniteTimeSpan);
+            {
+                System.Threading.Interlocked.Exchange(ref _heldSinceTicks, DateTime.UtcNow.Ticks);
+
+                // Periodic and wall-clock, not a one-shot measured in process time. A
+                // one-shot does not fire at all while the container is suspended, so a hold
+                // taken shortly before a suspension sailed straight past the platform's
+                // ninety seconds -- which *are* wall-clock -- and came back as
+                // ExecutionTimeExceeded. Measured: hold taken 22:58:20, container asleep,
+                // awake again 23:13:01, cancel 23:13:18.
+                _rotation = new System.Threading.Timer(
+                    _ => Review(), null, RotationCheck, RotationCheck);
+            }
+
+            /// <summary>
+            /// Gives the hold up once it has run its wall-clock course, or once the data
+            /// plane has gone quiet for <see cref="IdleBeforeSleep"/>.
+            ///
+            /// The idle half is the important one. Holding through an idle spell is what put
+            /// the container to sleep *while owing a deferral*, and the platform cancels a
+            /// hold it has waited ninety seconds for however asleep the holder was. Letting
+            /// go first means an idle tunnel sleeps owing nothing: the next outbound packet
+            /// wakes the container and the hold is taken again by whichever activation
+            /// carries it. That costs latency on the first packet after a quiet spell and
+            /// nothing else -- against ExecutionTimeExceeded, which takes the channel's data
+            /// path down for the rest of the host process.
+            /// </summary>
+            private void Review()
+            {
+                var held = DateTime.UtcNow - new DateTime(
+                    System.Threading.Interlocked.Read(ref _heldSinceTicks), DateTimeKind.Utc);
+
+                var quiet = SinceLastPacket;
+                if (quiet >= IdleBeforeSleep)
+                {
+                    Trace($"data plane quiet for {quiet.TotalSeconds:0}s, letting the container sleep");
+                    Finish();
+                    return;
+                }
+
+                if (held >= RotationInterval)
+                {
+                    Trace($"rotating the hold (held {held.TotalSeconds:0.0}s)");
+                    Finish();
+                }
+            }
+
+            /// <summary>UTC ticks at which this activation took the hold.</summary>
+            private long _heldSinceTicks;
 
             public void Finish()
             {
@@ -139,6 +227,43 @@ namespace FortiVpnPlugin
 
         /// <summary>How long one activation keeps the container awake before handing over.</summary>
         private static readonly TimeSpan RotationInterval = TimeSpan.FromSeconds(60);
+
+        /// <summary>
+        /// How often a live hold re-reads the wall clock. Frequent because the check is the
+        /// only thing standing between a suspension and ExecutionTimeExceeded, and it costs
+        /// one comparison.
+        /// </summary>
+        private static readonly TimeSpan RotationCheck = TimeSpan.FromSeconds(1);
+
+        /// <summary>
+        /// How long the data plane may be silent before the hold is released and the
+        /// container is allowed to sleep owing nothing. Well inside the platform's ninety
+        /// seconds, so the decision to let go is always ours.
+        ///
+        /// Five rather than thirty because of what a disconnect looks like from in here. The
+        /// plugin is never told about one -- no Disconnect call and no cancel has ever been
+        /// logged -- so the only thing it does while Windows tears the tunnel down is hold a
+        /// deferral the platform cannot collect. Measured: last packet out at 00:33:01,
+        /// Settings still saying "Disconnecting" fifteen seconds later, the hold not released
+        /// until 00:33:32. Traffic stops the moment the user clicks, so a short silence is
+        /// the earliest reliable sign that the tunnel is going away.
+        ///
+        /// The cost is paid by a tunnel that is merely idle rather than closing: it sleeps
+        /// sooner, and the next outbound packet waits for the container to be woken. That is
+        /// latency on one packet, against fifteen seconds of staring at a dialog.
+        /// </summary>
+        private static readonly TimeSpan IdleBeforeSleep = TimeSpan.FromSeconds(5);
+
+        /// <summary>
+        /// UTC ticks of the last packet seen in either direction. Read from the rotation
+        /// timer on another thread, so it moves through <see cref="System.Threading.Interlocked"/>.
+        /// </summary>
+        private static long _lastTrafficTicks;
+
+        /// <summary>How long the data plane has been quiet.</summary>
+        private static TimeSpan SinceLastPacket
+            => DateTime.UtcNow - new DateTime(
+                System.Threading.Interlocked.Read(ref _lastTrafficTicks), DateTimeKind.Utc);
 
         /// <summary>
         /// How long the courtesy logout of a replaced session gets. Short on purpose: it is
@@ -174,7 +299,9 @@ namespace FortiVpnPlugin
         private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(25);
 
         /// <summary>
-        /// Whether the gateway turned the last credential down.
+        /// Whether the gateway turned down the credential used by the dial immediately
+        /// before this one. Non-zero for exactly one dial: <see cref="FetchCredentials"/>
+        /// consumes it.
         ///
         /// The platform answers <c>RequestCredentials</c> from its own cache unless the
         /// request is marked as a retry, and it caches whatever was typed even when the dial
@@ -183,10 +310,20 @@ namespace FortiVpnPlugin
         /// the gateway. Marking the next request as a retry is what drops the cached pair and
         /// puts the prompt back.
         ///
+        /// Consumed rather than left standing, because "retry" is an instruction for one dial
+        /// and it used to outlive the typo that set it. A profile that carries a username and
+        /// password -- entered in Settings > Add VPN, kept because the profile has
+        /// RememberCredentials -- is stored in that same cache, so a permanently armed retry
+        /// flag threw it away on every dial and prompted for a pair Windows already had.
+        /// That is the "SSL-VPN never lets me save my sign-in details" symptom: the details
+        /// were saved, and this discarded them.
+        ///
         /// Static because the platform builds a fresh plugin object for every event; an
-        /// instance field would be forgotten between the failed dial and the next one.
+        /// instance field would be forgotten between the failed dial and the next one. An int
+        /// rather than a bool so it can be read and cleared in one interlocked step -- the
+        /// platform dispatches Connect twice for the same dial.
         /// </summary>
-        private static bool _credentialRejected;
+        private static int _credentialRejected;
 
         /// <summary>
         /// Reassembly buffer for the inbound direction. The transport hands over whatever
@@ -400,7 +537,7 @@ namespace FortiVpnPlugin
         /// </summary>
         private static VpnPickedCredential? FetchCredentials(VpnChannel channel)
         {
-            if (_credentialRejected)
+            if (System.Threading.Interlocked.Exchange(ref _credentialRejected, 0) != 0)
             {
                 Trace("last attempt was rejected, asking for the credential again");
                 try
@@ -425,7 +562,10 @@ namespace FortiVpnPlugin
             // sitting on "Verifying your sign-in info" until it times out -- a line printed
             // after it never appears and the stall is indistinguishable from Connect never
             // having been called at all.
-            Trace("FortiPlugin.Connect entered");
+            // The object number matters more than the entry: whichever object the platform
+            // dispatches Connect to is, by definition, one it has associated with the channel.
+            // If Disconnect never arrives on that same number, the association is the bug.
+            Trace($"FortiPlugin.Connect entered on obj#{_instanceId}");
 
             // The platform dispatches Connect twice for the same dial -- two activations two
             // milliseconds apart, seen on every reconnect. Both used to run: the loser reached
@@ -533,8 +673,9 @@ namespace FortiVpnPlugin
                         "30 seconds and try again.");
                 }
 
-                // Only now is the pair known good, so the next dial may use the cache again.
-                _credentialRejected = false;
+                // Nothing to clear here any more: FetchCredentials consumed the flag on the
+                // way in, so a dial that gets this far has already left it down and the next
+                // one is free to use the cache -- which is where a saved sign-in lives.
 
                 var cfg = session.Config;
                 _rx.Clear();
@@ -579,9 +720,20 @@ namespace FortiVpnPlugin
                     false,
                     session.Socket);
 
+                // Seeded before the tunnel is declared live, so the first activation after
+                // this finds a fresh timestamp and takes the hold. Left at zero it would read
+                // as "quiet since year one" and the tunnel would be allowed to sleep before
+                // it had carried anything at all.
+                System.Threading.Interlocked.Exchange(ref _lastTrafficTicks, DateTime.UtcNow.Ticks);
+
                 _heartbeat?.Dispose();
+                // Idle is reported alongside the counters because it is now what decides
+                // whether the container may sleep, and a heartbeat that shows frozen counters
+                // without it cannot say whether the tunnel is quiet or stuck.
                 _heartbeat = new System.Threading.Timer(
-                    _ => Trace($"heartbeat: sent={_sent} received={_received}"), null, 10000, 10000);
+                    _ => Trace($"heartbeat: sent={_sent} received={_received} " +
+                               $"idle={SinceLastPacket.TotalSeconds:0}s"),
+                    null, 10000, 10000);
 
                 // Set last, and only on the path that actually started the channel: it is what
                 // tells the next activation to hold the container awake. A heartbeat line every
@@ -596,9 +748,10 @@ namespace FortiVpnPlugin
             }
             catch (UnauthorizedAccessException ex)
             {
-                // Arms the retry flag, so the next dial asks for the password again instead
-                // of replaying the one that was just refused.
-                _credentialRejected = true;
+                // Arms the retry flag for the *next* dial only, so it asks for the password
+                // again instead of replaying the one that was just refused. The dial after
+                // that goes back to the cache, where a sign-in saved in Settings lives.
+                System.Threading.Interlocked.Exchange(ref _credentialRejected, 1);
                 Trace($"Connect refused: {ex.Message}");
                 channel.SetErrorMessage(ex.Message);
             }
@@ -619,7 +772,14 @@ namespace FortiVpnPlugin
 
         public void Disconnect(VpnChannel channel)
         {
-            Trace($"FortiPlugin.Disconnect (sent={_sent} received={_received})");
+            // Timed step by step because a disconnect that feels slow has to be pinned on
+            // something before it can be made faster, and there are only two candidates in
+            // here: closing the socket, and the platform's own Stop. Everything else is
+            // field assignment. If this whole method comes back in single-digit
+            // milliseconds -- or is never logged at all -- then the wait is happening
+            // outside this plugin and no change in here can shorten it.
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            Trace($"FortiPlugin.Disconnect entered (sent={_sent} received={_received})");
 
             // Before the deferral is released, or the container can be suspended with the
             // teardown half done. Nothing left to keep awake once this returns.
@@ -628,11 +788,20 @@ namespace FortiVpnPlugin
 
             _heartbeat?.Dispose();
             _heartbeat = null;
+
+            var beforeDispose = clock.ElapsedMilliseconds;
             _session?.Dispose();
             _session = null;
+            Trace($"  session closed in {clock.ElapsedMilliseconds - beforeDispose}ms");
+
             channel.LogDiagnosticMessage("FortiPlugin.Disconnect");
             _rx.Clear();
+
+            var beforeStop = clock.ElapsedMilliseconds;
             channel.Stop();
+            Trace($"  channel.Stop in {clock.ElapsedMilliseconds - beforeStop}ms");
+
+            Trace($"FortiPlugin.Disconnect done in {clock.ElapsedMilliseconds}ms");
         }
 
         public void GetKeepAlivePayload(VpnChannel channel, out VpnPacketBuffer keepAlivePacket)
@@ -663,6 +832,27 @@ namespace FortiVpnPlugin
         /// <summary>How many times the platform has activated this background task.</summary>
         private static int _activations;
 
+        /// <summary>
+        /// How many times the class has been constructed, and which construction this object
+        /// is. Every other field here is static precisely because the shim log shows the
+        /// platform calling CreateInstance again and again -- state had to survive that. But
+        /// <see cref="VpnChannel.ProcessEventAsync"/> is handed <c>this</c>, not the state, and
+        /// a disconnect event that arrives on a freshly built object the platform never
+        /// associated with the channel would be dispatched to nothing at all. That is exactly
+        /// what the traces show: the event lands, ProcessEventAsync returns in a millisecond,
+        /// Disconnect is never called, and the platform waits out its fifteen second timeout.
+        /// Numbering the objects is what turns that from a plausible story into a fact.
+        /// </summary>
+        private static int _instances;
+        private readonly int _instanceId = System.Threading.Interlocked.Increment(ref _instances);
+
+        /// <summary>
+        /// The object every event is dispatched on: the first one the platform ever built in
+        /// this host process, which is necessarily the one that serviced Connect and therefore
+        /// the one the channel belongs to.
+        /// </summary>
+        private static FortiPlugin? _canonical;
+
         /// <summary>The live session, kept alive for as long as the tunnel is up.</summary>
         private static FortiSession? _session;
 
@@ -675,6 +865,10 @@ namespace FortiVpnPlugin
 
         private static void Count(ref int counter, string direction, int bytes)
         {
+            // Stamped on every packet, both directions: this is what tells the hold whether
+            // the tunnel is still carrying anything or has gone quiet enough to sleep.
+            System.Threading.Interlocked.Exchange(ref _lastTrafficTicks, DateTime.UtcNow.Ticks);
+
             var n = System.Threading.Interlocked.Increment(ref counter);
             // Every packet at first, so a ping can be matched to the calls it caused, then
             // powers of two once the pattern is established.
