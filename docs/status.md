@@ -157,10 +157,26 @@ Ca bon deu cho ra cung mot trieu chung: tunnel bao Connected ma khong tai gi.
 
 `install.ps1` khong tao ket noi nao. No chi dang ky package de "FortiGate SSL-VPN" hien
 ra trong danh sach VPN provider; nguoi dung tu them ket noi trong Settings, va plugin
-doc dia chi gateway ra tu profile do -- the `<serverUrl>` trong
-`VpnChannelConfiguration.CustomField`. `ServerServiceName` khong dung duoc, no doc ra
-"0"; `ServerUris` thi nem `Invalid URI` khi profile ghi dia chi dang "host:port" khong
-co scheme, va nem ngay luc doc vector nen khong loc rieng phan tu hong duoc.
+doc dia chi gateway ra tu profile do.
+
+**Dia chi phai go dang `https://host:port`.** Day khong phai so thich trinh bay, ma la
+cho duy nhat plugin doc lai duoc. Settings nhan `host:port` tran khong he bao gi, nhung
+ca hai duong dua dia chi vao app container deu chet voi no:
+
+- `ServerHostNameList` -- platform dung tung phan tu bang `HostName(String)`, ma
+  `HostName` khong nhan dau hai cham. Doc vector nem `E_INVALIDARG` ("The parameter is
+  incorrect. hostName") truoc khi giao ra phan tu nao. Duong nay chi con dung cho profile
+  ghi dia chi khong kem port.
+- `ServerUris` -- `System.Uri` doc `118.x.x.x:8080` thanh scheme `118.x.x.x`, nem
+  `Invalid URI: The URI scheme is not valid.`. Them `https://` vao thi parse dung ca host
+  lan port. Nem ngay luc doc vector nen khong loc rieng phan tu hong duoc.
+
+`CustomField` (the `<serverUrl>`) duoc thu truoc ca hai, nhung profile tao tu Settings de
+trong -- no chi co gia tri khi profile duoc dung bang tay. `ServerServiceName` chi duoc
+hoi den khi dia chi khong kem port, va thuong doc ra "0".
+
+Truoc day cho nay khong lo ra vi `ResolveServer` co hang so gateway de roi ve; bo hang so
+di (de day len git) moi thay no chua bao gio doc duoc profile that.
 
 Khong ky MSIX, khong `makeappx`: goi da ky chi cai duoc khi chung thu nam trong
 LocalMachine\Root, ma viec do can admin. Layout dang ky truc tiep thi khong.

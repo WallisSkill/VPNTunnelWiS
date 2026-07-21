@@ -27,7 +27,8 @@ package.
 
 Nothing creates a connection for you. Add it yourself in Settings > Network & internet >
 VPN > Add VPN, choosing "FortiGate SSL-VPN" as the VPN provider and entering your gateway
-address including the port.
+as a full URL with the port — `https://vpn.example.com:8080`. The `https://` matters:
+Settings takes a bare `host:port` happily, but no plugin can read that form back.
 
 ## Build
 

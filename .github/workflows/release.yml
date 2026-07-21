@@ -2,7 +2,7 @@
 #
 # Push a tag to cut a release:
 #
-#     git tag v0.2.0.19 && git push origin v0.2.0.19
+#     git tag v0.2.0.20 && git push origin v0.2.0.20
 #
 # Running it by hand from the Actions tab builds the same thing and leaves the zip as a
 # workflow artifact instead, which is the way to check a change before tagging it.
@@ -86,6 +86,12 @@ jobs:
         run: |
           # The .exe first, so it is the asset listed at the top of the release.
           $assets = @(Get-ChildItem out\*.exe, out\*.zip | ForEach-Object FullName)
-          gh release create $env:GITHUB_REF_NAME @assets `
+          if (-not $assets) { throw "No assets in out\ -- the build steps produced nothing." }
+          $assets | ForEach-Object { Write-Host "asset: $_" }
+
+          # $assets, not @assets: passing an array to a native command already spreads it
+          # into one argument per element, and the splat form is a cmdlet convention that
+          # only happens to work here.
+          gh release create $env:GITHUB_REF_NAME $assets `
             --title $env:GITHUB_REF_NAME `
             --notes-file release-notes.md

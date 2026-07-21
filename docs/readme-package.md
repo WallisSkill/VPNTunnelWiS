@@ -32,8 +32,15 @@ This zip exists for anyone who would rather see the scripts before running them.
 1. Settings > Network & internet > VPN > **Add VPN**
 2. VPN provider: **FortiGate SSL-VPN**
 3. Connection name: anything you like
-4. Server name or address: the gateway address including the port, e.g. `vpn.example.com:8080`
+4. Server name or address: the gateway as a **full URL with the port**, e.g.
+   `https://vpn.example.com:8080`
 5. Save, then click **Connect** and enter your own account
+
+Write the `https://` — it is not decoration. Settings accepts a bare
+`vpn.example.com:8080` without complaint, but a plugin cannot read that form back: Windows
+hands the address over either as a `HostName`, which rejects the colon outright, or as a
+URI, which reads the host name as a scheme. With the prefix it parses, and the connection
+fails at Connect with "no usable gateway address" without it.
 
 The password goes straight from Windows to the gateway. Nothing in this package stores it.
 

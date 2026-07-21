@@ -157,6 +157,13 @@ namespace FortiVpnPlugin
         private const int FrameOverhead = FortiFrame.HeaderSize + 2;
 
         /// <summary>
+        /// The port assumed when the profile names none. A string rather than an int because
+        /// that is how it travels from here to the socket, and because ResolveServer compares
+        /// against it to tell "the user typed a port" from "we guessed one".
+        /// </summary>
+        private const string DefaultPort = "443";
+
+        /// <summary>
         /// How long the whole exchange -- TLS, login, allocation, PPP -- gets before it is
         /// called off. Without a bound, a gateway that completes the TLS handshake and then
         /// says nothing leaves this thread parked in a read for as long as the socket stays
@@ -240,15 +247,17 @@ namespace FortiVpnPlugin
         /// Where to dial, taken from the profile the user created rather than from this
         /// assembly. The package is a provider: anyone may point a connection of their own
         /// at any FortiGate, and hard-coding one gateway would silently dial the wrong one.
-        /// The constants remain only as a fallback for a profile that carries no server.
+        ///
+        /// Three places are tried because the address lands in a different one depending on
+        /// how the connection was made, and each is read in its own try: they come straight
+        /// off the profile and any one of them can throw on its own.
         /// </summary>
         private static (string Host, string Port) ResolveServer(VpnChannel channel)
         {
             var cfg = channel.Configuration;
 
-            // CustomField first. It is the plugin schema the platform builds from the
-            // profile, and the address the user typed into Settings arrives inside it as
-            // <serverUrl>. ServerServiceName is not an alternative -- it reads back "0".
+            // CustomField first: it is the plugin schema, so anything put there was put
+            // there deliberately. A profile made in Settings leaves it empty.
             try
             {
                 var custom = cfg?.CustomField;
@@ -269,10 +278,60 @@ namespace FortiVpnPlugin
                 Trace($"CustomField unreadable: {ex.Message}");
             }
 
-            // Each property in its own try: they are read straight off the profile and any
-            // one can throw alone. ServerUris is marshalled as System.Uri, so a bare
-            // "host:port" with no scheme makes reading the vector throw before any of it
-            // can be inspected -- which is why it is not the first thing tried.
+            // Then the host name list, which serves a profile whose address carries no port:
+            // the port then has to come from ServerServiceName instead.
+            //
+            // It cannot serve one that does. The platform builds each element by calling
+            // HostName(String) on the stored text, and HostName rejects a colon, so reading
+            // the vector throws E_INVALIDARG ("The parameter is incorrect. hostName") before
+            // a single element is handed over. That is not recoverable from here -- which is
+            // why the address has to be typed as a URI, and why ServerUris below is the
+            // branch that actually runs for this gateway.
+            try
+            {
+                foreach (var name in cfg?.ServerHostNameList ?? [])
+                {
+                    // Both logged, not just the one used: which of the two keeps the port is
+                    // the whole question here, and a log that only shows the winner cannot
+                    // answer it the next time a profile arrives in some third shape.
+                    Trace($"ServerHostNameList: canonical='{name?.CanonicalName}' " +
+                          $"display='{name?.DisplayName}'");
+
+                    var text = string.IsNullOrWhiteSpace(name?.CanonicalName)
+                        ? name?.DisplayName
+                        : name.CanonicalName;
+                    if (string.IsNullOrWhiteSpace(text)) continue;
+
+                    var parsed = ParseServer(text);
+                    if (parsed is null) continue;
+
+                    // A port typed as part of the address is already in there. Only when it
+                    // is not does ServerServiceName get a say -- and it usually has nothing
+                    // to say, reading back as "0" for a profile that named no service.
+                    if (parsed.Value.Port != DefaultPort) return parsed.Value;
+
+                    var service = cfg?.ServerServiceName;
+                    Trace($"ServerServiceName: '{service}'");
+                    if (!string.IsNullOrWhiteSpace(service) && service != "0" &&
+                        int.TryParse(service, out var port) && port is > 0 and <= 65535)
+                    {
+                        return (parsed.Value.Host, service);
+                    }
+
+                    return parsed.Value;
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace($"ServerHostNameList unreadable: {ex.Message}");
+            }
+
+            // Last in order, first in practice: this is the branch that carries a gateway
+            // with a port on it. "host:port" typed on its own does not reach here intact --
+            // System.Uri reads the host as a scheme and throws "The URI scheme is not
+            // valid." -- so the address has to be typed as "https://host:port", which both
+            // Settings and Uri accept. Reading the vector throws outright when any element
+            // fails to parse, so nothing can be salvaged element by element.
             try
             {
                 var uri = cfg?.ServerUris?.FirstOrDefault();
@@ -280,8 +339,8 @@ namespace FortiVpnPlugin
                 {
                     // Port is -1 when the profile names no port, and FortiOS portals are
                     // https, so 443 is the right default rather than 80.
-                    var port = uri.Port > 0 ? uri.Port : 443;
-                    return (uri.Host, port.ToString());
+                    var port = uri.Port > 0 ? uri.Port.ToString() : DefaultPort;
+                    return (uri.Host, port);
                 }
             }
             catch (Exception ex)
@@ -292,9 +351,14 @@ namespace FortiVpnPlugin
             // No built-in gateway to fall back on, deliberately: the address belongs to
             // whoever installs this, not to the plugin. Failing here names the one thing the
             // user can actually fix.
+            // Naming the exact form is the whole point of this message: "host:port" is the
+            // obvious thing to type, it is what Settings accepts without complaint, and it
+            // is unreadable from in here.
             throw new InvalidOperationException(
-                "This connection has no gateway address. Edit it in Settings > Network & " +
-                "internet > VPN and enter the address, including the port.");
+                "This connection has no usable gateway address. Edit it in Settings > " +
+                "Network & internet > VPN and enter the server as a full URL with the " +
+                "port, like https://vpn.example.com:8080 -- an address written without " +
+                "https:// cannot be read back.");
         }
 
         /// <summary>
@@ -321,7 +385,7 @@ namespace FortiVpnPlugin
                 return (text[..colon].Trim('[', ']'), port.ToString());
             }
 
-            return (text.Trim('[', ']'), "443");
+            return (text.Trim('[', ']'), DefaultPort);
         }
 
         /// <summary>
