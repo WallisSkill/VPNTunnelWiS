@@ -5,8 +5,25 @@ rem cl.exe is not on PATH and never will be: vcvars64.bat is what puts the compi
 rem the CRT headers and the SDK libs there, so everything has to run inside one cmd
 rem session that has sourced it.
 
+rem The edition in the path is not fixed: a workstation has BuildTools, a CI runner has
+rem Enterprise. vswhere ships at a stable location with every install since 2017 and is
+rem the supported way to ask; the hardcoded path stays only as a fallback for a machine
+rem where it is somehow missing.
 setlocal
-call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul
+set vcvars=
+set vswhere=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe
+if exist "%vswhere%" (
+    for /f "usebackq tokens=*" %%i in (`"%vswhere%" -latest -products * ^
+        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 ^
+        -property installationPath`) do set "vcvars=%%i\VC\Auxiliary\Build\vcvars64.bat"
+)
+if not defined vcvars set "vcvars=%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+if not exist "%vcvars%" (
+    echo Could not find vcvars64.bat. Install the "Desktop development with C++" workload.
+    exit /b 1
+)
+
+call "%vcvars%" >nul
 if errorlevel 1 exit /b 1
 
 set here=%~dp0

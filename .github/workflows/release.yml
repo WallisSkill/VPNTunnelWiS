@@ -1,0 +1,64 @@
+# Builds the package and publishes the zip.
+#
+# Push a tag to cut a release:
+#
+#     git tag v0.2.0.19 && git push origin v0.2.0.19
+#
+# Running it by hand from the Actions tab builds the same thing and leaves the zip as a
+# workflow artifact instead, which is the way to check a change before tagging it.
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create the release; nothing else is written
+
+jobs:
+  build:
+    # Windows only, and not by preference: the build needs cl.exe with the C++ toolset,
+    # the Windows SDK's makepri, and a win-x64 self-contained publish.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      # -NoBump: the version in Package.appxmanifest is what is committed, so a build
+      # here must report that number rather than invent a higher one no tag matches.
+      - name: Build
+        run: powershell -ExecutionPolicy Bypass -File build.ps1 -NoBump
+
+      - name: Package
+        run: powershell -ExecutionPolicy Bypass -File package.ps1
+
+      - name: Read the version out of the manifest
+        id: version
+        shell: pwsh
+        run: |
+          $v = ([xml](Get-Content src\Shell\Package.appxmanifest)).Package.Identity.Version
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FortiVpnPlugin-${{ steps.version.outputs.version }}
+          path: out/*.zip
+
+      # Only when a tag was pushed. gh is preinstalled on the runner, so no third-party
+      # action gets a token here.
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $zip = (Get-ChildItem out\*.zip | Select-Object -First 1).FullName
+          gh release create $env:GITHUB_REF_NAME $zip `
+            --title $env:GITHUB_REF_NAME `
+            --notes "Package version ${{ steps.version.outputs.version }}. Unpack and run install.ps1; Developer Mode must be on. See docs/readme-package.md."
