@@ -389,7 +389,7 @@ namespace FortiVpnPlugin
         /// how the connection was made, and each is read in its own try: they come straight
         /// off the profile and any one of them can throw on its own.
         /// </summary>
-        private static (string Host, string Port) ResolveServer(VpnChannel channel)
+        private static ServerTarget ResolveServer(VpnChannel channel)
         {
             var cfg = channel.Configuration;
 
@@ -405,8 +405,11 @@ namespace FortiVpnPlugin
                     var to = custom.IndexOf(close, StringComparison.OrdinalIgnoreCase);
                     if (from >= 0 && to > from)
                     {
-                        var parsed = ParseServer(custom[(from + open.Length)..to]);
-                        if (parsed is not null) return parsed.Value;
+                        var raw = custom[(from + open.Length)..to];
+                        var parsed = ParseServer(raw);
+                        if (parsed is not null)
+                            return new ServerTarget(parsed.Value.Host, parsed.Value.Port,
+                                                    SplitFromAddress(raw));
                     }
                 }
             }
@@ -441,21 +444,23 @@ namespace FortiVpnPlugin
 
                     var parsed = ParseServer(text);
                     if (parsed is null) continue;
+                    var split = SplitFromAddress(text);
 
                     // A port typed as part of the address is already in there. Only when it
                     // is not does ServerServiceName get a say -- and it usually has nothing
                     // to say, reading back as "0" for a profile that named no service.
-                    if (parsed.Value.Port != DefaultPort) return parsed.Value;
+                    if (parsed.Value.Port != DefaultPort)
+                        return new ServerTarget(parsed.Value.Host, parsed.Value.Port, split);
 
                     var service = cfg?.ServerServiceName;
                     Trace($"ServerServiceName: '{service}'");
                     if (!string.IsNullOrWhiteSpace(service) && service != "0" &&
                         int.TryParse(service, out var port) && port is > 0 and <= 65535)
                     {
-                        return (parsed.Value.Host, service);
+                        return new ServerTarget(parsed.Value.Host, service, split);
                     }
 
-                    return parsed.Value;
+                    return new ServerTarget(parsed.Value.Host, parsed.Value.Port, split);
                 }
             }
             catch (Exception ex)
@@ -477,7 +482,9 @@ namespace FortiVpnPlugin
                     // Port is -1 when the profile names no port, and FortiOS portals are
                     // https, so 443 is the right default rather than 80.
                     var port = uri.Port > 0 ? uri.Port.ToString() : DefaultPort;
-                    return (uri.Host, port);
+                    // A "/split" left on the path is the one place a split-tunnel request can
+                    // ride in: Uri keeps it as AbsolutePath, clear of the host and port.
+                    return new ServerTarget(uri.Host, port, SplitFromAddress(uri.AbsolutePath));
                 }
             }
             catch (Exception ex)
@@ -523,6 +530,73 @@ namespace FortiVpnPlugin
             }
 
             return (text.Trim('[', ']'), DefaultPort);
+        }
+
+        /// <summary>
+        /// One resolved gateway: where to dial, and -- when the profile address carried a
+        /// <c>/split</c> -- which networks alone should go through the tunnel.
+        /// <see cref="SplitRoutes"/> is null when there was no such directive, and Connect
+        /// then routes whatever the gateway asks for (everything, for this one).
+        /// </summary>
+        private sealed record ServerTarget(string Host, string Port, List<VpnRoute>? SplitRoutes);
+
+        /// <summary>
+        /// The private IPv4 ranges a bare <c>/split</c> routes through the tunnel. Enough to
+        /// reach machines on an office LAN -- remote desktop included -- while every public
+        /// address stays on the physical adapter and the machine keeps its own internet.
+        /// </summary>
+        private static readonly (string Network, byte Prefix)[] PrivateRanges =
+        {
+            ("10.0.0.0", 8), ("172.16.0.0", 12), ("192.168.0.0", 16),
+        };
+
+        /// <summary>
+        /// Finds a <c>/split</c> directive anywhere in the address the user typed and turns it
+        /// into the list of networks to tunnel. Returns null when there is none, which leaves
+        /// the tunnel carrying everything the gateway asks for.
+        ///
+        /// <c>/split</c> on its own means <see cref="PrivateRanges"/>. <c>/split=10.1.0.0/16</c>
+        /// -- comma-separated, a bare address meaning a single /32 -- names exact networks
+        /// instead. A token that is not an IPv4 network is dropped with a log line rather than
+        /// thrown: a typo must not reach the platform, and it must not silently fall back to a
+        /// full tunnel either, which is the very thing <c>/split</c> exists to avoid.
+        /// </summary>
+        private static List<VpnRoute>? SplitFromAddress(string? address)
+        {
+            if (string.IsNullOrEmpty(address)) return null;
+            var at = address.IndexOf("/split", StringComparison.OrdinalIgnoreCase);
+            if (at < 0) return null;
+
+            var rest = address[(at + "/split".Length)..].TrimStart('=', ':').Trim('/');
+            var routes = new List<VpnRoute>();
+            if (rest.Length > 0)
+            {
+                foreach (var token in rest.Split(new[] { ',', ';', ' ' },
+                                                 StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var parts = token.Split('/');
+                    var net = parts[0].Trim();
+                    // No prefix means a single host.
+                    byte prefix = 32;
+                    if (parts.Length > 1 && byte.TryParse(parts[1], out var p) && p <= 32)
+                        prefix = p;
+
+                    if (System.Net.IPAddress.TryParse(net, out var ip) &&
+                        ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                        routes.Add(new VpnRoute(new HostName(net), prefix));
+                    else
+                        Trace($"split route ignored, not an IPv4 network: '{token}'");
+                }
+            }
+
+            // Nothing usable typed -- or nothing at all after the word -- means the private
+            // ranges. Never an empty list, which Connect would read as "no split" and send the
+            // whole machine back through the tunnel.
+            if (routes.Count == 0)
+                foreach (var (network, prefix) in PrivateRanges)
+                    routes.Add(new VpnRoute(new HostName(network), prefix));
+
+            return routes;
         }
 
         /// <summary>
@@ -580,8 +654,10 @@ namespace FortiVpnPlugin
             _tunnelLive = false;
             try
             {
-                var (host, port) = ResolveServer(channel);
-                Trace($"FortiPlugin.Connect -> {host}:{port}");
+                var target = ResolveServer(channel);
+                var (host, port) = (target.Host, target.Port);
+                Trace($"FortiPlugin.Connect -> {host}:{port}" +
+                      (target.SplitRoutes is null ? "" : $" (split: {target.SplitRoutes.Count} route(s))"));
                 channel.LogDiagnosticMessage($"FortiPlugin.Connect -> {host}:{port}");
 
                 // Windows collects and stores the credential; the plugin only ever sees it
@@ -683,7 +759,16 @@ namespace FortiVpnPlugin
                 var addresses = new List<HostName> { new HostName(cfg.AssignedIpText) };
 
                 var routes = new VpnRouteAssignment { ExcludeLocalSubnets = true };
-                if (cfg.Routes.Count == 0)
+                if (target.SplitRoutes is { Count: > 0 } splitRoutes)
+                {
+                    // A /split on the profile address: only these networks go through the
+                    // tunnel, and the machine keeps its own internet for everything else. The
+                    // gateway's own route list is deliberately ignored here -- /split is the
+                    // user overriding it, and for this gateway it is empty in any case.
+                    foreach (var route in splitRoutes)
+                        routes.Ipv4InclusionRoutes.Add(route);
+                }
+                else if (cfg.Routes.Count == 0)
                 {
                     // No split-tunnel list means the gateway wants everything.
                     routes.Ipv4InclusionRoutes.Add(new VpnRoute(new HostName("0.0.0.0"), 0));
@@ -741,8 +826,13 @@ namespace FortiVpnPlugin
                 // the container went to sleep under a live tunnel.
                 _tunnelLive = true;
 
+                var effectiveRoutes = target.SplitRoutes is { Count: > 0 } sr
+                    ? string.Join(" ", sr.Select(r => $"{r.Address.CanonicalName}/{r.PrefixSize}"))
+                    : cfg.Routes.Count == 0
+                        ? "0.0.0.0/0"
+                        : string.Join(" ", cfg.Routes.Select(r => $"{r.Item1}/{r.Item2}"));
                 Trace($"tunnel up, IP {cfg.AssignedIpText} mtu={cfg.Mtu} " +
-                      $"routes=[{string.Join(" ", cfg.Routes.Select(r => $"{r.Item1}/{r.Item2}"))}] " +
+                      $"routes=[{effectiveRoutes}]{(target.SplitRoutes is null ? "" : " split")} " +
                       $"dns=[{string.Join(" ", cfg.DnsServers)}] suffix=[{string.Join(" ", cfg.DnsSuffixes)}]");
                 channel.LogDiagnosticMessage($"tunnel up, IP {cfg.AssignedIpText}");
             }

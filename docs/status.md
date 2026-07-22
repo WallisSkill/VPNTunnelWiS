@@ -270,6 +270,26 @@ None of this showed up earlier because `ResolveServer` had a hard-coded gateway 
 back on; removing the constant (to put this on git) is what revealed it had never once
 read a real profile.
 
+**Split tunnel rides on the address path.** By default the tunnel carries everything
+(`0.0.0.0/0`), because this gateway returns an empty `<split-tunnel-info>` and full tunnel
+is the only safe assumption when the gateway says nothing. That takes the whole machine's
+internet with it. Appending `/split` to the profile address routes only the RFC1918 private
+ranges -- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` -- through the tunnel and leaves
+the public internet on the physical adapter: enough to remote-desktop into an office LAN
+without losing the machine's own connection. `/split=10.1.0.0/16,192.168.50.0/24` names
+exact networks instead (comma-separated, a bare address meaning a single /32).
+
+The path is the only channel that survives. `System.Uri` parses `https://host:port/split`
+into host, port and `AbsolutePath`, so the directive arrives clear of the gateway address
+that `ResolveServer` needs; a prefix like `split/https://...` would instead make `split` the
+URI scheme and fail parsing outright. `SplitFromAddress` reads it from the path in every
+branch (`CustomField`, `ServerHostNameList`, `ServerUris`) so the form is the same however
+the profile was created. `ExcludeLocalSubnets=true` already keeps the machine's own subnet
+off the tunnel, so a home `192.168.x` network keeps working even though `192.168.0.0/16` is
+in the tunnel routes. A `/split` token that parses to nothing usable falls back to the
+private ranges rather than to a full tunnel -- the whole point was to *stop* sending the
+machine through the gateway, so a typo must not quietly do exactly that.
+
 No signed MSIX, no `makeappx`: a signed package can only be installed if the certificate is
 in LocalMachine\Root, and putting it there needs an administrator. Registering the layout
 directly does not.

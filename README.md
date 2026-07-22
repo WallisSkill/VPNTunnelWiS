@@ -30,6 +30,27 @@ VPN > Add VPN, choosing "FortiGate SSL-VPN" as the VPN provider and entering you
 as a full URL with the port — `https://vpn.example.com:8080`. The `https://` matters:
 Settings takes a bare `host:port` happily, but no plugin can read that form back.
 
+### Split tunnel
+
+By default the whole machine's traffic goes through the tunnel, so while the VPN is up
+the machine uses the gateway for everything — which is what you want if the point is to
+be *on* the office network, but it means the rest of the internet rides through the
+gateway too (and is lost entirely if the gateway does not route it out).
+
+Add **`/split`** to the end of the address to route only private networks through the
+tunnel and leave the public internet on your normal adapter:
+
+    https://vpn.example.com:8080/split
+
+That tunnels `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16` — enough to remote-desktop
+into office machines while everything else stays direct. To tunnel exact networks instead,
+name them (comma-separated; a bare address means a single host):
+
+    https://vpn.example.com:8080/split=10.1.0.0/16,192.168.50.0/24
+
+Your own local subnet is always kept off the tunnel, so local devices keep working even
+when it overlaps one of the ranges above.
+
 ## Build
 
     powershell -ExecutionPolicy Bypass -File build.ps1      # produces dist\
