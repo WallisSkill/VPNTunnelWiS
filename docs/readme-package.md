@@ -1,6 +1,6 @@
-# FortiGate SSL-VPN for the built-in Windows VPN client
+# VPNTunnelWiS for the built-in Windows VPN client
 
-This package adds a **VPN provider** named "FortiGate SSL-VPN" to Settings > Network &
+This package adds a **VPN provider** named "VPNTunnelWiS" to Settings > Network &
 internet > VPN. Once it is installed you create a connection of your own pointing at
 your own gateway. No FortiClient, no administrator rights.
 
@@ -30,7 +30,7 @@ This zip exists for anyone who would rather see the scripts before running them.
 ## Creating a connection
 
 1. Settings > Network & internet > VPN > **Add VPN**
-2. VPN provider: **FortiGate SSL-VPN**
+2. VPN provider: **VPNTunnelWiS**
 3. Connection name: anything you like
 4. Server name or address: the gateway as a **full URL with the port**, e.g.
    `https://vpn.example.com:8080`

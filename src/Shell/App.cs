@@ -21,7 +21,7 @@ namespace FortiVpnPlugin
     /// </summary>
     public static class App
     {
-        private const string ProfileName = "FortiGate SSL-VPN";
+        private const string ProfileName = "VPNTunnelWiS";
 
         /// <summary>
         /// Gateway to point the profile at, given on the command line as

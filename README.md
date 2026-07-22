@@ -26,7 +26,7 @@ administrator either. .NET does not have to be installed — the runtime ships i
 package.
 
 Nothing creates a connection for you. Add it yourself in Settings > Network & internet >
-VPN > Add VPN, choosing "FortiGate SSL-VPN" as the VPN provider and entering your gateway
+VPN > Add VPN, choosing "VPNTunnelWiS" as the VPN provider and entering your gateway
 as a full URL with the port — `https://vpn.example.com:8080`. The `https://` matters:
 Settings takes a bare `host:port` happily, but no plugin can read that form back.
 

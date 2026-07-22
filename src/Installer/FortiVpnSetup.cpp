@@ -35,7 +35,7 @@ namespace
     // already-installed copy is found again in order to be replaced.
     constexpr wchar_t PackageName[] = L"FortiGateSslVpn.Plugin";
     constexpr wchar_t PackagePublisher[] = L"CN=FortiVpnPluginDev";
-    constexpr wchar_t ProviderName[] = L"FortiGate SSL-VPN";
+    constexpr wchar_t ProviderName[] = L"VPNTunnelWiS";
     constexpr wchar_t FolderName[] = L"FortiVpnMatrix";
 
     void Say(std::wstring const& line) { wprintf(L"%s\n", line.c_str()); }

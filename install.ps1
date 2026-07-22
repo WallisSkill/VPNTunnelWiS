@@ -1,11 +1,11 @@
-# Installs what build.ps1 produced, so that "FortiGate SSL-VPN" appears as a VPN
+# Installs what build.ps1 produced, so that "VPNTunnelWiS" appears as a VPN
 # provider to choose from in Settings.
 #
 #     powershell -ExecutionPolicy Bypass -File install.ps1
 #
 # It deliberately creates no connection. The package is a provider: which gateway to
 # dial, under what name, is the user's to decide in Settings > Network & internet >
-# VPN > Add VPN, picking "FortiGate SSL-VPN" as the VPN provider. The plugin reads the
+# VPN > Add VPN, picking "VPNTunnelWiS" as the VPN provider. The plugin reads the
 # server address out of whatever profile is dialled.
 #
 # No administrator anywhere in here: the package is registered for the current user
@@ -97,5 +97,5 @@ Write-Host "Package: $($pkg.PackageFullName)"
 Write-Host "Provider: $($pkg.PackageFamilyName)"
 Write-Host ""
 Write-Host "Done. Settings > Network & internet > VPN > Add VPN,"
-Write-Host "set VPN provider = ""FortiGate SSL-VPN"", enter your gateway address including"
+Write-Host "set VPN provider = ""VPNTunnelWiS"", enter your gateway address including"
 Write-Host "the port (for example vpn.example.com:10443) and Save."
