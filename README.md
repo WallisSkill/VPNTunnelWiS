@@ -51,6 +51,25 @@ name them (comma-separated; a bare address means a single host):
 Your own local subnet is always kept off the tunnel, so local devices keep working even
 when it overlaps one of the ranges above.
 
+#### Locking split behind a key
+
+Split can be gated so it only turns on for someone who knows a secret you choose. Set
+`SplitUnlockKey` in [`src/Plugin/FortiPlugin.cs`](src/Plugin/FortiPlugin.cs) before you
+build. Then, whenever a connection whose address ends in `/split` comes up, a code box
+appears and the split routes are only applied if what you type matches the key — a wrong
+key, or a cancelled prompt, leaves the connection on a full tunnel. Nothing is stored in
+the address, so the key never travels in the profile. Leave `SplitUnlockKey` empty to keep
+`/split` working with no prompt.
+
+### Two-factor (FortiToken / OTP)
+
+No setup needed. If the gateway answers sign-in with a second-factor challenge, Windows
+puts up a code box; enter the FortiToken / one-time code and the sign-in completes.
+
+When an account needs a gateway 2FA code **and** the split key, both boxes appear in turn:
+the gateway's code first, then the split key. Same-looking dialogs — the order is what
+tells them apart.
+
 ## Build
 
     powershell -ExecutionPolicy Bypass -File build.ps1      # produces dist\
