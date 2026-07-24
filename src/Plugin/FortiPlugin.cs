@@ -289,20 +289,6 @@ namespace FortiVpnPlugin
         private const string DefaultPort = "443";
 
         /// <summary>
-        /// The secret that unlocks split tunnelling. Set this before you build, to whatever
-        /// you like. When a connection's address asks for a split tunnel (<c>/split</c>), a
-        /// code box goes up at connect time and the machine only gets the split routes if the
-        /// value typed matches this. It is a separate prompt from the gateway's own 2FA and
-        /// always comes after it, so an account that needs both is asked for the gateway's
-        /// code first and this one second. A wrong key -- or a cancelled prompt -- drops split
-        /// and leaves the machine on a full tunnel, so no one turns split on without it.
-        ///
-        /// Left empty, split is not gated at all and a bare <c>/split</c> works with no prompt.
-        /// Set a value here to lock it.
-        /// </summary>
-        private const string SplitUnlockKey = "";
-
-        /// <summary>
         /// How long the whole exchange -- TLS, login, allocation, PPP -- gets before it is
         /// called off. Without a bound, a gateway that completes the TLS handshake and then
         /// says nothing leaves this thread parked in a read for as long as the socket stays
@@ -643,32 +629,6 @@ namespace FortiVpnPlugin
             return channel.RequestCredentials(VpnCredentialType.UsernamePassword, false, false, null);
         }
 
-        /// <summary>
-        /// Puts a single code box up and returns what the user typed, or null if they
-        /// cancelled. Both the gateway's own second factor (ret=2) and the split-tunnel key
-        /// go through here, one after the other when a connection needs both. UsernameOtpPin
-        /// is the credential type whose dialog is a lone code field; the value lands in
-        /// AdditionalPin, and PasskeyCredential.Password is the fallback for the platform
-        /// builds that route a one-time code through the password field instead.
-        /// </summary>
-        private static string? RequestCode(VpnChannel channel, string purpose)
-        {
-            try
-            {
-                Trace($"requesting code: {purpose}");
-                var picked = channel.RequestCredentials(
-                    VpnCredentialType.UsernameOtpPin, false, false, null);
-                var code = picked?.AdditionalPin;
-                if (string.IsNullOrEmpty(code)) code = picked?.PasskeyCredential?.Password;
-                return string.IsNullOrEmpty(code) ? null : code;
-            }
-            catch (Exception ex)
-            {
-                Trace($"code prompt unavailable (0x{ex.HResult:X8}): {ex.Message}");
-                return null;
-            }
-        }
-
         public void Connect(VpnChannel channel)
         {
             // Before the profile is read, not after. Reading the configuration is already a
@@ -760,10 +720,6 @@ namespace FortiVpnPlugin
                     // Both sinks: the platform channel needs administrator rights to read,
                     // so the file is the only copy we can actually get at.
                     Log = line => { Trace(line); channel.LogDiagnosticMessage(line); },
-
-                    // Only invoked if the gateway answers login with ret=2; a single-code
-                    // dialog goes up and the code comes back for the follow-up POST.
-                    TwoFactorPrompt = challenge => RequestCode(channel, $"gateway 2FA: {challenge}"),
                 };
 
                 // Before the socket is connected, not after: the platform has to mark the
@@ -802,36 +758,14 @@ namespace FortiVpnPlugin
 
                 var addresses = new List<HostName> { new HostName(cfg.AssignedIpText) };
 
-                // Split is a second gate, opened only by the key set in SplitUnlockKey. The
-                // prompt goes up here -- after login, so a gateway that also wants a 2FA code
-                // has already asked for its own, and this one is the second box the user sees.
-                // A wrong key, or a cancelled prompt, drops split back to a full tunnel rather
-                // than granting the narrower routing to someone without the key.
-                var splitRoutes = target.SplitRoutes;
-                if (splitRoutes is { Count: > 0 } && !string.IsNullOrEmpty(SplitUnlockKey))
-                {
-                    var typed = RequestCode(channel, "split-tunnel key");
-                    if (string.Equals(typed, SplitUnlockKey, StringComparison.Ordinal))
-                    {
-                        Trace("split key accepted");
-                    }
-                    else
-                    {
-                        Trace(typed is null
-                            ? "split key prompt cancelled; staying on a full tunnel"
-                            : "split key does not match; staying on a full tunnel");
-                        splitRoutes = null;
-                    }
-                }
-
                 var routes = new VpnRouteAssignment { ExcludeLocalSubnets = true };
-                if (splitRoutes is { Count: > 0 } sr)
+                if (target.SplitRoutes is { Count: > 0 } splitRoutes)
                 {
                     // A /split on the profile address: only these networks go through the
                     // tunnel, and the machine keeps its own internet for everything else. The
                     // gateway's own route list is deliberately ignored here -- /split is the
                     // user overriding it, and for this gateway it is empty in any case.
-                    foreach (var route in sr)
+                    foreach (var route in splitRoutes)
                         routes.Ipv4InclusionRoutes.Add(route);
                 }
                 else if (cfg.Routes.Count == 0)
@@ -892,13 +826,13 @@ namespace FortiVpnPlugin
                 // the container went to sleep under a live tunnel.
                 _tunnelLive = true;
 
-                var effectiveRoutes = splitRoutes is { Count: > 0 } sr2
-                    ? string.Join(" ", sr2.Select(r => $"{r.Address.CanonicalName}/{r.PrefixSize}"))
+                var effectiveRoutes = target.SplitRoutes is { Count: > 0 } sr
+                    ? string.Join(" ", sr.Select(r => $"{r.Address.CanonicalName}/{r.PrefixSize}"))
                     : cfg.Routes.Count == 0
                         ? "0.0.0.0/0"
                         : string.Join(" ", cfg.Routes.Select(r => $"{r.Item1}/{r.Item2}"));
                 Trace($"tunnel up, IP {cfg.AssignedIpText} mtu={cfg.Mtu} " +
-                      $"routes=[{effectiveRoutes}]{(splitRoutes is null ? "" : " split")} " +
+                      $"routes=[{effectiveRoutes}]{(target.SplitRoutes is null ? "" : " split")} " +
                       $"dns=[{string.Join(" ", cfg.DnsServers)}] suffix=[{string.Join(" ", cfg.DnsSuffixes)}]");
                 channel.LogDiagnosticMessage($"tunnel up, IP {cfg.AssignedIpText}");
             }

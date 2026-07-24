@@ -60,15 +60,6 @@ internal sealed class FortiSession : IDisposable
 
     public Action<string>? Log { get; set; }
 
-    /// <summary>
-    /// Called when the gateway answers a login with <c>ret=2</c> -- a second-factor
-    /// challenge (FortiToken / one-time code), not a rejection. The argument is the
-    /// challenge message the gateway sent; the return is the code the user typed, or
-    /// null to abandon the sign-in. Null itself when the plugin has no way to prompt,
-    /// in which case a gateway that demands a code cannot be signed in to.
-    /// </summary>
-    public Func<string, string?>? TwoFactorPrompt { get; set; }
-
     public FortiSession(string host, string port)
     {
         _host = host;
@@ -229,47 +220,10 @@ internal sealed class FortiSession : IDisposable
 
         var (loginHdr, loginBody) = await SendAsync("POST", "/remote/logincheck", form);
 
-        // ret=2 is a challenge, not a rejection: the gateway wants a second factor
-        // (FortiToken / OTP). The body is a comma-separated list of the fields the
-        // follow-up POST has to echo back verbatim -- reqid/polid/grp/portal/magic --
-        // alongside the code the user types. This is the same exchange FortiClient and
-        // openfortivpn make; skip it and a two-factor account can never sign in.
-        if (loginBody.Contains("ret=2"))
-        {
-            string Field(string name)
-            {
-                var m = Regex.Match(loginBody, $@"(?:^|,)\s*{name}=([^,\r\n]*)",
-                                    RegexOptions.IgnoreCase);
-                return m.Success ? m.Groups[1].Value.Trim() : "";
-            }
-
-            var chalMsg = Field("chal_msg");
-            var code = TwoFactorPrompt?.Invoke(
-                chalMsg.Length > 0 ? chalMsg : "Enter your verification code");
-            if (string.IsNullOrEmpty(code))
-                throw new UnauthorizedAccessException(
-                    "this account needs a verification code and none was entered");
-
-            var otpForm = $"username={Uri.EscapeDataString(username)}" +
-                          $"&realm={Uri.EscapeDataString(Hidden("realm"))}" +
-                          $"&reqid={Uri.EscapeDataString(Field("reqid"))}" +
-                          $"&polid={Uri.EscapeDataString(Field("polid"))}" +
-                          $"&grp={Uri.EscapeDataString(Field("grp"))}" +
-                          $"&portal={Uri.EscapeDataString(Field("portal"))}" +
-                          $"&magic={Uri.EscapeDataString(Field("magic"))}" +
-                          $"&reqtime={Uri.EscapeDataString(Field("reqtime"))}" +
-                          $"&code={Uri.EscapeDataString(code)}" +
-                          $"&code2=&just_logged_in=1";
-
-            Trace("second factor requested; submitting the code");
-            (loginHdr, loginBody) = await SendAsync("POST", "/remote/logincheck", otpForm);
-        }
-
         // Success takes two shapes: the ajax "ret=1,redir=..." form, and a plain redirect
         // to the portal. Anything else is a rejected credential.
         if (!loginBody.Contains("ret=1") && !loginBody.Contains("/sslvpn/portal.html"))
-            throw new UnauthorizedAccessException(
-                "sign-in failed (wrong user name, password, or verification code)");
+            throw new UnauthorizedAccessException("sign-in failed (wrong user name or password)");
 
         TakeCookie(loginHdr);
 
