@@ -72,3 +72,4 @@ self-contained publish leave no choice.
 - [docs/readme-package.md](docs/readme-package.md) — what ships in the zip, for whoever installs it.
 - [docs/status.md](docs/status.md) — what works, and the notes behind every fix: why the host
   must be native, why the deferral has to rotate, what the Fortinet frame looks like.
+* In case you got error with remote desktop(Usually cause by driver of win11 -> https://www.realtek.com/Download/ToDownload?type=direct&downloadid=3613 download here)
