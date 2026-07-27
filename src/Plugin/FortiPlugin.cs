@@ -629,6 +629,32 @@ namespace FortiVpnPlugin
             return channel.RequestCredentials(VpnCredentialType.UsernamePassword, false, false, null);
         }
 
+        /// <summary>
+        /// Puts a single code box up and returns what the user typed, or null if they
+        /// cancelled or the platform cannot show one. This is the gateway's own second
+        /// factor (ret=2). UsernameOtpPin is the credential type whose dialog is a lone code
+        /// field; the value lands in AdditionalPin, and PasskeyCredential.Password is the
+        /// fallback for platform builds that route a one-time code through the password
+        /// field instead.
+        /// </summary>
+        private static string? RequestCode(VpnChannel channel, string purpose)
+        {
+            try
+            {
+                Trace($"requesting code: {purpose}");
+                var picked = channel.RequestCredentials(
+                    VpnCredentialType.UsernameOtpPin, false, false, null);
+                var code = picked?.AdditionalPin;
+                if (string.IsNullOrEmpty(code)) code = picked?.PasskeyCredential?.Password;
+                return string.IsNullOrEmpty(code) ? null : code;
+            }
+            catch (Exception ex)
+            {
+                Trace($"code prompt unavailable (0x{ex.HResult:X8}): {ex.Message}");
+                return null;
+            }
+        }
+
         public void Connect(VpnChannel channel)
         {
             // Before the profile is read, not after. Reading the configuration is already a
@@ -720,6 +746,10 @@ namespace FortiVpnPlugin
                     // Both sinks: the platform channel needs administrator rights to read,
                     // so the file is the only copy we can actually get at.
                     Log = line => { Trace(line); channel.LogDiagnosticMessage(line); },
+
+                    // Only invoked if the gateway answers login with ret=2; a single-code
+                    // dialog goes up and the code comes back for the follow-up POST.
+                    TwoFactorPrompt = challenge => RequestCode(channel, $"gateway 2FA: {challenge}"),
                 };
 
                 // Before the socket is connected, not after: the platform has to mark the

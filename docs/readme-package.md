@@ -44,6 +44,10 @@ fails at Connect with "no usable gateway address" without it.
 
 The password goes straight from Windows to the gateway. Nothing in this package stores it.
 
+If your account has **two-factor** (FortiToken / a one-time code), the gateway asks for it
+during Connect: a second box appears after the password, you type the code, and the sign-in
+finishes. Nothing about the code is stored either.
+
 The gateway usually returns no DNS servers, so connect to internal machines by **IP
 address** rather than by name.
 
