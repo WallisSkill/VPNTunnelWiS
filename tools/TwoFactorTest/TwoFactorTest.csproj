@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>TwoFactorTest</RootNamespace>
+  </PropertyGroup>
+
+  <!-- The plugin's own second-factor logic, compiled straight into the test rather than
+       referenced: FortiVpnPlugin is a WinRT component on a windows TFM, and this file
+       needs none of that. The test therefore exercises the exact code that ships. -->
+  <ItemGroup>
+    <Compile Include="..\..\src\Plugin\TwoFactor.cs" />
+  </ItemGroup>
+</Project>

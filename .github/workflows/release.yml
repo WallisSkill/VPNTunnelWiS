@@ -30,6 +30,12 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
+      # The second-factor login parsing, offline. It compiles src\Plugin\TwoFactor.cs and
+      # asserts against captured challenge bodies -- no gateway, no credential -- and exits
+      # non-zero on any failure, so a broken 2FA path fails the release before it is built.
+      - name: Test the 2FA login parsing
+        run: dotnet run --project tools/TwoFactorTest -c Release --nologo
+
       # -NoBump: the version in Package.appxmanifest is what is committed, so a build
       # here must report that number rather than invent a higher one no tag matches.
       - name: Build

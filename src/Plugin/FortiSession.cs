@@ -60,6 +60,15 @@ internal sealed class FortiSession : IDisposable
 
     public Action<string>? Log { get; set; }
 
+    /// <summary>
+    /// Called when the gateway answers a login with <c>ret=2</c> -- a second-factor
+    /// challenge (FortiToken / one-time code), not a rejection. The argument is the
+    /// challenge message the gateway sent; the return is the code the user typed, or
+    /// null to abandon the sign-in. Left null when the plugin has no way to prompt, in
+    /// which case a gateway that demands a code cannot be signed in to.
+    /// </summary>
+    public Func<string, string?>? TwoFactorPrompt { get; set; }
+
     public FortiSession(string host, string port)
     {
         _host = host;
@@ -220,10 +229,27 @@ internal sealed class FortiSession : IDisposable
 
         var (loginHdr, loginBody) = await SendAsync("POST", "/remote/logincheck", form);
 
+        // ret=2 is a challenge, not a rejection: the gateway wants a second factor
+        // (FortiToken / OTP). The parsing and the follow-up body live in TwoFactor so they
+        // can be tested without a socket; here we only prompt and re-POST. Skip this and a
+        // two-factor account can never sign in.
+        if (TwoFactor.IsChallenge(loginBody))
+        {
+            var code = TwoFactorPrompt?.Invoke(TwoFactor.ChallengeMessage(loginBody));
+            if (string.IsNullOrEmpty(code))
+                throw new UnauthorizedAccessException(
+                    "this account needs a verification code and none was entered");
+
+            var otpForm = TwoFactor.BuildOtpForm(username, Hidden("realm"), loginBody, code);
+            Trace("second factor requested; submitting the code");
+            (loginHdr, loginBody) = await SendAsync("POST", "/remote/logincheck", otpForm);
+        }
+
         // Success takes two shapes: the ajax "ret=1,redir=..." form, and a plain redirect
         // to the portal. Anything else is a rejected credential.
         if (!loginBody.Contains("ret=1") && !loginBody.Contains("/sslvpn/portal.html"))
-            throw new UnauthorizedAccessException("sign-in failed (wrong user name or password)");
+            throw new UnauthorizedAccessException(
+                "sign-in failed (wrong user name, password, or verification code)");
 
         TakeCookie(loginHdr);
 
