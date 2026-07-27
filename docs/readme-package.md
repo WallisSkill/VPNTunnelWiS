@@ -51,6 +51,17 @@ finishes. Nothing about the code is stored either.
 The gateway usually returns no DNS servers, so connect to internal machines by **IP
 address** rather than by name.
 
+## Updating
+
+    powershell -ExecutionPolicy Bypass -File update.ps1
+
+This asks the release page for the latest version, compares it with the copy registered on
+this machine, and — only after showing you what it is about to fetch and getting a yes —
+downloads the new `FortiVpnSetup` and runs it. It needs no administrator, the same as the
+install. Add `-Check` to only be told whether a newer version exists without downloading
+anything (useful from a scheduled task). Existing connections keep working across an update:
+the package family name does not change between versions.
+
 ## Uninstall
 
     powershell -ExecutionPolicy Bypass -File uninstall.ps1

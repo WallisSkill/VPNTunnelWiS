@@ -59,6 +59,7 @@ when it overlaps one of the ranges above.
 
     powershell -ExecutionPolicy Bypass -File install.ps1    # register dist\ in place
     powershell -ExecutionPolicy Bypass -File uninstall.ps1
+    powershell -ExecutionPolicy Bypass -File update.ps1     # check GitHub, install if newer
 
 `install.ps1` registers the `dist\` folder where it stands, which is the short way round
 while working on the plugin. `installer.ps1` is what produces the file other people get.

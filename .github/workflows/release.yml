@@ -2,7 +2,11 @@
 #
 # Push a tag to cut a release:
 #
-#     git tag v0.2.0.20 && git push origin v0.2.0.20
+#     git tag v1.0.0.4 && git push origin v1.0.0.4
+#
+# The tag must match the version in src\Shell\Package.appxmanifest (a v-prefix on the tag,
+# bare in the manifest); the self-updater compares the two, so a mismatch makes it miss or
+# misreport the release.
 #
 # Running it by hand from the Actions tab builds the same thing and leaves the zip as a
 # workflow artifact instead, which is the way to check a change before tagging it.
@@ -35,6 +39,12 @@ jobs:
       # non-zero on any failure, so a broken 2FA path fails the release before it is built.
       - name: Test the 2FA login parsing
         run: dotnet run --project tools/TwoFactorTest -c Release --nologo
+
+      # The self-updater's version-parsing and comparison logic, offline. It never touches
+      # the network in this mode and exits non-zero on any failure, so a broken update check
+      # -- one that would nag on bad data or miss a real release -- fails the build.
+      - name: Test the self-update logic
+        run: powershell -ExecutionPolicy Bypass -File update.ps1 -SelfTest
 
       # -NoBump: the version in Package.appxmanifest is what is committed, so a build
       # here must report that number rather than invent a higher one no tag matches.

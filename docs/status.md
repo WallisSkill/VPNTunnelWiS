@@ -314,3 +314,18 @@ things worth remembering:
   underneath.
 
 The one requirement: Developer Mode on.
+
+## Self-update (`update.ps1`)
+
+The provider is an unsigned side-loaded package, so Windows updates nothing for it. `update.ps1`
+closes that gap: it reads the version registered on the machine (`Get-AppxPackage`), asks the
+GitHub release page for the latest tag, and compares the two. `-Check` reports only, and exits
+10 when a newer release exists so a scheduled task can key on it; the default mode, on finding a
+newer release, downloads `FortiVpnSetup-<version>.exe` and runs it -- but only after printing what
+it is about to fetch and getting a yes (or `-Yes` for unattended use). It needs no administrator,
+the same as the install, and connections survive the update because the package family name does
+not change between versions.
+
+The version-parsing and comparison logic is pure and covered by `update.ps1 -SelfTest` (16 cases:
+tag/version parsing, the "never nag on unparsable or missing data" rule, asset selection). CI runs
+that self-test as a release gate, so a broken update check fails the build.
