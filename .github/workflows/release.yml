@@ -2,7 +2,7 @@
 #
 # Push a tag to cut a release:
 #
-#     git tag v1.0.0.4 && git push origin v1.0.0.4
+#     git tag v1.0.0.5 && git push origin v1.0.0.5
 #
 # The tag must match the version in src\Shell\Package.appxmanifest (a v-prefix on the tag,
 # bare in the manifest); the self-updater compares the two, so a mismatch makes it miss or

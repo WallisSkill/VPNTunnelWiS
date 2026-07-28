@@ -6,7 +6,7 @@
     The provider is an unsigned side-loaded package, so nothing on the machine updates it
     for you. This asks the release page of
 
-        https://github.com/WallisSkill/FortinetVpn
+        https://github.com/WallisSkill/VPNTunnelWiS
 
     for the latest version, compares it against the copy registered on this machine, and if
     the release is newer downloads FortiVpnSetup-<version>.exe and runs it. Downloading and
@@ -44,7 +44,7 @@ $ErrorActionPreference = 'Stop'
 
 # Both come from Package.appxmanifest / the repo URL and are the only two things that tie
 # this script to a particular product. Keep PackageName matching the manifest identity.
-$Repo        = 'WallisSkill/FortinetVpn'
+$Repo        = 'WallisSkill/VPNTunnelWiS'
 $PackageName = 'FortiGateSslVpn.Plugin'
 
 # --- pure logic, no network, no machine state: this is what -SelfTest exercises ----------

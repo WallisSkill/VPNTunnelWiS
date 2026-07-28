@@ -1,4 +1,4 @@
-# FortinetVpn
+# VPNTunnelWiS
 
 A **VPN provider** for the VPN page built into Windows. Install it and a FortiOS
 SSL-VPN gateway becomes something you dial from Settings > Network & internet > VPN,
@@ -16,7 +16,7 @@ dials, and the tools under `tools\` take it on the command line.
 ## Install
 
 Download `FortiVpnSetup-<version>.exe` from the
-[latest release](https://github.com/WallisSkill/FortinetVpn/releases) and run it. That is
+[latest release](https://github.com/WallisSkill/VPNTunnelWiS/releases) and run it. That is
 the whole install — the layout rides inside the executable, so there is nothing to unpack
 and nothing to download afterwards. Run it again with `/remove` to uninstall.
 
