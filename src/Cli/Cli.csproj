@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The cross-platform FortiGate SSL-VPN client: a plain .NET console app, no WinRT,
+       so it builds and runs on macOS and Linux. It reuses the protocol core the Windows
+       plugin already proved against this same gateway (the frame format and the PPP state
+       machine are literally the same source files, linked in below) and swaps the
+       Windows-only transport (StreamSocket) for SslStream, plus a tun/utun data plane the
+       plugin never needed because on Windows the VPN platform owned the interface. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>fortivpn</AssemblyName>
+    <RootNamespace>FortiVpn</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- Linked, not copied: Ppp.cs (FortiFrame, CtrlPacket, Proto, Opt) and TwoFactor.cs
+       depend on nothing but the BCL, so the exact bytes the plugin sends on Windows are
+       the bytes this client sends on macOS/Linux. One bug fixed once. -->
+  <ItemGroup>
+    <Compile Include="..\Plugin\Ppp.cs" Link="Shared\Ppp.cs" />
+    <Compile Include="..\Plugin\TwoFactor.cs" Link="Shared\TwoFactor.cs" />
+  </ItemGroup>
+
+</Project>

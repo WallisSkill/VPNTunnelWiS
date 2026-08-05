@@ -68,8 +68,17 @@ Needs the .NET 9 SDK, the C++ toolset ("Desktop development with C++"), and the 
 SDK. The build is Windows-only and not by preference: `cl.exe`, `makepri` and a win-x64
 self-contained publish leave no choice.
 
+## Mac and Linux
+
+The plugin is Windows-only — its whole delivery mechanism is the Windows VPN Platform. For
+macOS and Linux there is a separate, self-written client under [src/Cli](src/Cli) that speaks
+the same SSL-VPN protocol, reusing this repo's own frame and 2FA core (`Ppp.cs`,
+`TwoFactor.cs`) and adding a tun/utun data plane. It needs `sudo` there — the
+no-administrator property is specific to Windows. See [docs/mac-linux.md](docs/mac-linux.md).
+
 ## Documentation
 
+- [docs/mac-linux.md](docs/mac-linux.md) — the macOS/Linux client (`src/Cli`): build and use.
 - [docs/readme-package.md](docs/readme-package.md) — what ships in the zip, for whoever installs it.
 - [docs/status.md](docs/status.md) — what works, and the notes behind every fix: why the host
   must be native, why the deferral has to rotate, what the Fortinet frame looks like.
