@@ -81,9 +81,57 @@ exit; a box running `systemd-resolved`/`resolvconf` may reassert its own, in whi
 DNS through that. On macOS DNS is not changed automatically — if office names do not resolve,
 `sudo networksetup -setdnsservers Wi-Fi <server> ...` and clear it with `... Wi-Fi empty`.
 
+## The desktop VPN panel
+
+Both systems have a built-in VPN page, like Windows' Settings > Network & internet > VPN.
+How far a FortiGate SSL-VPN can be pushed into them differs sharply.
+
+### Ubuntu / GNOME — yes, through NetworkManager
+
+The VPN section of GNOME Settings is **NetworkManager**, and NetworkManager takes VPN
+plugins the way Windows takes a VPN provider. Debian and Ubuntu already ship one for this
+protocol, wrapping openfortivpn:
+
+    sudo apt install network-manager-fortisslvpn-gnome
+
+Then **Settings > Network > VPN > +** offers "Fortinet SSLVPN". Fill in the gateway
+(`vpn.example.com`, and the port your Windows profile uses) and your account name.
+
+Two things this buys that the CLI cannot:
+
+- The connection is dialled from the desktop, including the top-bar switch.
+- **No `sudo` per connection.** Installing needs root once; after that the NetworkManager
+  daemon (already root) does the work and polkit authorises your desktop user. This is the
+  closest thing on Linux to the Windows plugin's no-administrator property.
+
+**Check the second factor before relying on it.** The stock plugin's handling of FortiToken
+/ OTP accounts has historically been the weak spot, and this gateway's accounts use one. If
+the GUI cannot complete a `ret=2` challenge, `fortivpn` above still signs in — and the
+fallback is a NetworkManager plugin of our own wrapping this client, which reuses the exact
+2FA code the Windows plugin already proves against this gateway. Not written yet: it is
+worth knowing whether the stock one suffices first.
+
+### macOS — possible, but behind Apple's paywall
+
+macOS's built-in VPN types (IKEv2, L2TP/IPsec) are the native IKE stack and cannot carry
+this protocol, so there is no shortcut through them. Appearing in **System Settings > VPN**
+means shipping an app with a **`NEPacketTunnelProvider`** — the direct analogue of the
+Windows `IVpnPlugIn`. What that costs, against Windows:
+
+| | Windows plugin | macOS NEPacketTunnelProvider |
+| --- | --- | --- |
+| Developer account | free (Developer Mode) | Apple Developer Program, paid yearly |
+| Privileged entitlement | granted by Developer Mode | `com.apple.developer.networking.networkextension`, granted by Apple on request |
+| Signing / notarisation | not required | required |
+| Language | reuses this repo's C# | Swift/Obj-C; NetworkExtension has no .NET binding |
+
+So on macOS the CLI above is the practical answer unless someone is willing to pay for and
+maintain a signed app.
+
 ## Notes
 
-- Needs `sudo`; there is no unprivileged mode on macOS/Linux.
+- The CLI needs `sudo`; there is no unprivileged mode on macOS/Linux. The NetworkManager
+  route above is the exception, and only on Linux.
 - The 2FA handling is the gateway's, identical to what the Windows plugin drives — the code
   the token app shows is what you enter here too.
 - One protocol core, two front ends: a bug fixed in `Ppp.cs`/`TwoFactor.cs` is fixed for both
