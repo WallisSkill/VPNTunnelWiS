@@ -2,7 +2,7 @@
 #
 # Push a tag to cut a release:
 #
-#     git tag v1.0.0.5 && git push origin v1.0.0.5
+#     git tag v1.0.0.6 && git push origin v1.0.0.6
 #
 # The tag must match the version in src\Shell\Package.appxmanifest (a v-prefix on the tag,
 # bare in the manifest); the self-updater compares the two, so a mismatch makes it miss or
@@ -22,10 +22,46 @@ permissions:
   contents: write   # needed to create the release; nothing else is written
 
 jobs:
+  # The macOS/Linux client (src/Cli). Plain .NET with no native toolchain, so it
+  # cross-publishes from one Linux runner to every target RID -- and it must not be
+  # built on the Windows job, whose whole point is the toolchain this does not need.
+  # Self-contained single files: the people who get these should not have to install
+  # a runtime first.
+  cli:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rid: [linux-x64, linux-arm64, osx-x64, osx-arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Publish ${{ matrix.rid }}
+        run: >
+          dotnet publish src/Cli -c Release -r ${{ matrix.rid }}
+          --self-contained -p:PublishSingleFile=true
+          -o out/cli-${{ matrix.rid }}
+
+      # Named per RID so the four artifacts stay apart, and renamed on the way out so a
+      # release page lists fortivpn-osx-arm64 rather than four files all called fortivpn.
+      - name: Name the binary after its target
+        run: mv out/cli-${{ matrix.rid }}/fortivpn out/fortivpn-${{ matrix.rid }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.rid }}
+          path: out/fortivpn-${{ matrix.rid }}
+
   build:
     # Windows only, and not by preference: the build needs cl.exe with the C++ toolset,
     # the Windows SDK's makepri, and a win-x64 self-contained publish.
     runs-on: windows-latest
+    # The release is published from this job, so it waits for the client binaries and
+    # attaches them alongside the installer.
+    needs: cli
 
     steps:
       - uses: actions/checkout@v4
@@ -71,6 +107,14 @@ jobs:
             out/*.exe
             out/*.zip
 
+      # The four client binaries from the cli job, flattened into out\ next to the
+      # installer so the publish step below picks them all up in one sweep.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: out
+          merge-multiple: true
+
       # Written as a file rather than passed to --notes: markdown full of backticks and
       # asterisks does not survive being a PowerShell argument, and a YAML block scalar
       # carries it through untouched.
@@ -79,6 +123,8 @@ jobs:
         shell: bash
         run: |
           cat > release-notes.md <<'NOTES'
+          ## Windows
+
           Download **FortiVpnSetup-VERSION.exe** and run it. That is the whole install:
           no unpacking, no PowerShell, no administrator. Run it again with `/remove` to
           uninstall.
@@ -89,6 +135,30 @@ jobs:
           Either way **Developer Mode** has to be on (Settings > System > For developers).
           That is what lets Windows register an unsigned package, and turning it on does
           not need an administrator either.
+
+          ## macOS and Linux
+
+          The plugin is Windows-only, so these systems get their own client speaking the
+          same SSL-VPN protocol. Download the one for your machine, make it executable and
+          run it:
+
+          | file | for |
+          | --- | --- |
+          | `fortivpn-linux-x64` | Linux, Intel/AMD |
+          | `fortivpn-linux-arm64` | Linux, ARM |
+          | `fortivpn-osx-arm64` | macOS, Apple Silicon |
+          | `fortivpn-osx-x64` | macOS, Intel |
+
+          ```
+          chmod +x fortivpn-linux-x64
+          sudo ./fortivpn-linux-x64 vpn.example.com:PORT
+          ```
+
+          Nothing to install: the runtime is inside the binary. It does need **sudo** —
+          opening a tunnel interface and setting routes requires root there, so the
+          no-administrator property is specific to the Windows plugin. See
+          [docs/mac-linux.md](docs/mac-linux.md) for the options, certificate pinning and
+          DNS notes.
           NOTES
           sed -i "s/VERSION/${{ steps.version.outputs.version }}/g" release-notes.md
 
@@ -100,9 +170,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # The .exe first, so it is the asset listed at the top of the release.
-          $assets = @(Get-ChildItem out\*.exe, out\*.zip | ForEach-Object FullName)
+          # The .exe first, so it is the asset listed at the top of the release; the
+          # macOS/Linux clients after the zip. -ErrorAction on the last pattern only:
+          # a missing fortivpn-* means the cli job produced nothing, which the count
+          # check below turns into a failure rather than a quietly short release.
+          $assets = @(Get-ChildItem out\*.exe, out\*.zip, out\fortivpn-* -ErrorAction SilentlyContinue |
+                      ForEach-Object FullName)
           if (-not $assets) { throw "No assets in out\ -- the build steps produced nothing." }
+          $clients = @($assets | Where-Object { $_ -match 'fortivpn-' }).Count
+          if ($clients -ne 4) { throw "Expected 4 client binaries, found $clients." }
           $assets | ForEach-Object { Write-Host "asset: $_" }
 
           # $assets, not @assets: passing an array to a native command already spreads it
