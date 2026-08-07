@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""The password prompt NetworkManager shows when this VPN type connects.
+
+NetworkManager never asks for secrets itself. It asks a *secret agent* -- GNOME Shell on a
+normal desktop -- and the agent, faced with a VPN type it has never heard of, runs the
+program named by `auth-dialog=` in the .name file. That program is this one. It is a plain
+executable with a line-oriented protocol, not a library and not a shared object, which is why
+handling a second factor here needs none of the C that the Settings "+" form does.
+
+Two ways to answer, and which one runs is the desktop's choice, so both are implemented:
+
+  --external-ui-mode  Describe the fields and let GNOME draw them. This is the good path: a
+                      real GNOME dialog in the session's own style. The description is a
+                      GKeyFile on stdout; the shell renders it and hands the answers straight
+                      to NetworkManager, so this process never sees them.
+
+  (no flag)           Draw the dialog with zenity and print the answers back. The fallback
+                      for agents that do not support the above.
+
+The one-time code is asked for every time and never saved, which is arithmetic rather than
+policy: a code that could be replayed out of a keyring would not be a second factor. The
+password may be saved, if the profile's password-flags allow it.
+"""
+
+import select
+import subprocess
+import sys
+import time
+
+TITLE = "FortiGate VPN"
+
+# The agent writes the profile immediately or not at all. This bound only stops a stray
+# invocation from a terminal from hanging forever.
+READ_TIMEOUT = 10.0
+
+# The agent says QUIT once it has the secrets. If it dies first, do not linger.
+QUIT_TIMEOUT = 20.0
+
+
+def read_request(timeout=READ_TIMEOUT):
+    """Read the profile the agent feeds us, in libnm's own wire format:
+
+        DATA_KEY=gateway
+        DATA_VAL=vpn.example.com:10443
+
+        SECRET_KEY=password
+        SECRET_VAL=
+
+        DONE
+
+    Keys and values are on separate, prefixed lines rather than alternating bare lines, and
+    getting that wrong is silent: the dialog reads nothing, decides it has no password, and
+    prompts for one that was already saved."""
+    data = {}
+    secrets = {}
+    key = None
+    deadline = time.monotonic() + timeout
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        readable, _, _ = select.select([sys.stdin], [], [], remaining)
+        if not readable:
+            break
+        line = sys.stdin.readline()
+        if line == "":
+            break
+        line = line.rstrip("\n")
+
+        if line == "DONE":
+            break
+        if line.startswith("DATA_KEY="):
+            key = ("data", line[len("DATA_KEY="):])
+        elif line.startswith("SECRET_KEY="):
+            key = ("secret", line[len("SECRET_KEY="):])
+        elif line.startswith("DATA_VAL=") and key and key[0] == "data":
+            data[key[1]] = line[len("DATA_VAL="):]
+            key = None
+        elif line.startswith("SECRET_VAL=") and key and key[0] == "secret":
+            secrets[key[1]] = line[len("SECRET_VAL="):]
+            key = None
+
+    return data, secrets
+
+
+def wants_two_factor(data):
+    # The gateway decides mid-login whether it wants a code, so nothing here knows for
+    # certain. Default to asking: an unnecessary empty box costs one keystroke, a missing one
+    # costs a failed connection with no visible reason.
+    return data.get("two-factor", "yes").lower() not in ("no", "false", "0", "off")
+
+
+def external_ui(data, secrets, name, reprompt):
+    """A GKeyFile describing the fields. Every group other than [VPN Plugin UI] is a field,
+    and ShouldAsk is what decides whether a dialog appears at all -- with a saved password and
+    no second factor, nothing is asked and the connection comes up silently."""
+    have_password = bool(secrets.get("password")) and not reprompt
+
+    out = [
+        "[VPN Plugin UI]",
+        "Description=You need to authenticate to access %s." % (name or "the VPN"),
+        "Title=Authenticate VPN",
+        "Version=2",
+        "",
+        "[password]",
+        "Label=_Password:",
+        "IsSecret=1",
+        "ShouldAsk=%d" % (0 if have_password else 1),
+        "Value=%s" % (secrets.get("password", "") if have_password else ""),
+        "",
+    ]
+
+    if wants_two_factor(data):
+        out += [
+            "[otp]",
+            "Label=_One-time code:",
+            "IsSecret=1",
+            # Always 1. A code that survived to a second connection would not be one-time.
+            "ShouldAsk=1",
+            "Value=",
+            "",
+        ]
+
+    sys.stdout.write("\n".join(out) + "\n")
+    sys.stdout.flush()
+    return 0
+
+
+def zenity(*args):
+    try:
+        done = subprocess.run(["zenity"] + list(args),
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              universal_newlines=True)
+    except OSError:
+        return None                      # zenity is not installed
+    if done.returncode != 0:
+        return None                      # cancelled
+    return done.stdout.rstrip("\n")
+
+
+def ask_with_zenity(data, secrets, reprompt):
+    password = secrets.get("password", "")
+    if not password or reprompt:
+        # Two dialogs rather than one --forms: --forms joins its answers with a separator
+        # character, and a password containing that character would be split in the wrong
+        # place with nothing to indicate it. Same reasoning as the desktop launcher.
+        password = zenity("--password", "--title", TITLE)
+        if password is None:
+            return None
+
+    otp = ""
+    if wants_two_factor(data):
+        otp = zenity("--entry", "--title", TITLE, "--width", "340",
+                     "--text",
+                     "One-time code from your token app.\n"
+                     "Leave blank if your account has none.")
+        if otp is None:
+            return None
+
+    return {"password": password, "otp": otp}
+
+
+def emit(answers):
+    """Back out the way libnm expects: bare key/value lines, then a blank line."""
+    for key, value in answers.items():
+        sys.stdout.write("%s\n%s\n" % (key, value))
+    sys.stdout.write("\n\n")
+    sys.stdout.flush()
+
+
+def wait_for_quit():
+    deadline = time.monotonic() + QUIT_TIMEOUT
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        readable, _, _ = select.select([sys.stdin], [], [], remaining)
+        if not readable:
+            return
+        line = sys.stdin.readline()
+        if line == "" or line.strip() == "QUIT":
+            return
+
+
+def main():
+    argv = sys.argv[1:]
+
+    def value_of(*flags):
+        for flag in flags:
+            if flag in argv:
+                try:
+                    return argv[argv.index(flag) + 1]
+                except IndexError:
+                    return None
+        return None
+
+    name = value_of("-n", "--name") or ""
+    reprompt = "-r" in argv or "--reprompt" in argv
+    interaction = "-i" in argv or "--allow-interaction" in argv
+    external = "--external-ui-mode" in argv
+
+    data, secrets = read_request()
+
+    if external:
+        return external_ui(data, secrets, name, reprompt)
+
+    if not interaction:
+        # Not allowed to put anything on screen. Answer with what we were given, or admit we
+        # cannot help -- inventing an answer here produces a rejected sign-in and no clue why.
+        if secrets.get("password") and not reprompt:
+            emit({"password": secrets["password"]})
+            wait_for_quit()
+            return 0
+        return 1
+
+    answers = ask_with_zenity(data, secrets, reprompt)
+    if answers is None:
+        return 1                         # cancelled; NetworkManager gives up quietly
+
+    emit(answers)
+    wait_for_quit()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

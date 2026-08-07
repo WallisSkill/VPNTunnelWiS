@@ -58,12 +58,19 @@ jobs:
       - name: Bundle the Ubuntu installer
         if: startsWith(matrix.rid, 'linux')
         run: |
-          mkdir -p pkg/fortivpn
+          mkdir -p pkg/fortivpn/nm
           cp out/fortivpn-${{ matrix.rid }} pkg/fortivpn/
           cp linux/install.sh linux/fortivpn-session linux/fortivpn-gui \
              linux/org.fortivpn.session.policy linux/fortivpn.desktop pkg/fortivpn/
+          # nm/ is the NetworkManager integration: optional, run after install.sh, and the
+          # reason a profile can appear in Settings > Network at all.
+          cp linux/nm/install-nm.sh linux/nm/nm-fortivpn-service \
+             linux/nm/nm-fortivpn-auth-dialog linux/nm/nm-fortivpn-service.name \
+             linux/nm/nm-fortivpn-service.conf pkg/fortivpn/nm/
           chmod +x pkg/fortivpn/install.sh pkg/fortivpn/fortivpn-session \
-                   pkg/fortivpn/fortivpn-gui pkg/fortivpn/fortivpn-${{ matrix.rid }}
+                   pkg/fortivpn/fortivpn-gui pkg/fortivpn/fortivpn-${{ matrix.rid }} \
+                   pkg/fortivpn/nm/install-nm.sh pkg/fortivpn/nm/nm-fortivpn-service \
+                   pkg/fortivpn/nm/nm-fortivpn-auth-dialog
           tar -C pkg -czf out/fortivpn-${{ matrix.rid }}.tar.gz fortivpn
 
       - uses: actions/upload-artifact@v4
@@ -172,6 +179,20 @@ jobs:
           typed into the desktop prompt and are never stored.
 
           Remove it with `sudo ./install.sh --uninstall`.
+
+          ### In Settings → Network instead of the app grid
+
+          One more step turns it into a **NetworkManager VPN connection**, driven by this
+          same client rather than by openfortivpn:
+
+          ```
+          cd nm && sudo ./install-nm.sh
+          ```
+
+          **FortiGate VPN** is then in **Settings → Network**, with a switch in the top-bar
+          menu and an autoconnect option. It does not appear under Settings → "+" — creating
+          a profile by mouse needs a GTK module in C — so the installer writes the profile
+          for you.
 
           ## macOS, or Linux without a desktop
 

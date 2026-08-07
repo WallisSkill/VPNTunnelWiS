@@ -1,0 +1,25 @@
+# What makes NetworkManager aware that this VPN type exists at all. Dropped into
+# /usr/lib/NetworkManager/VPN/, read at startup, and that is the whole registration.
+#
+# `service` is the bus name NetworkManager will talk to, and it must match the one a profile
+# names in its service-type= line and the one nm-fortivpn-service claims on the system bus.
+# All three are the same string or nothing connects.
+#
+# `program` is what NetworkManager runs when a connection using this type comes up. It is
+# started as root, on demand, and is expected to own `service` and answer on it.
+#
+# There is no `properties=` key here, and its absence is the one visible gap: that key names
+# a GTK shared object, and without it this type does not appear under Settings > Network > +.
+# A profile that already exists shows up in the panel, connects from the top-bar menu and
+# autoconnects at login -- everything except being *created* by mouse. install-nm.sh writes
+# the profile instead.
+
+[VPN Connection]
+name=fortivpn
+service=org.freedesktop.NetworkManager.fortivpn
+program=/usr/libexec/nm-fortivpn-service
+supports-multiple-connections=false
+
+[GNOME]
+auth-dialog=/usr/libexec/nm-fortivpn-auth-dialog
+supports-external-ui-mode=true

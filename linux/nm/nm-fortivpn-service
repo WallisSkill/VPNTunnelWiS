@@ -1,0 +1,538 @@
+#!/usr/bin/env python3
+"""NetworkManager VPN service for this repository's own FortiGate SSL-VPN client.
+
+What NetworkManager needs from a VPN type is a process on the system bus that answers
+org.freedesktop.NetworkManager.VPN.Plugin: it is asked to Connect with a profile and its
+secrets, and it answers with signals -- Config and Ip4Config describing the tunnel, then a
+state change to STARTED. Everything visible in the desktop follows from that one contract.
+The profile in Settings, the switch in the top-bar menu, autoconnect at login, the padlock
+in the panel: all of it is NetworkManager reacting to those signals.
+
+The tunnel itself is not implemented here. It is `fortivpn`, the client in src/Cli, run with
+--nm so that it opens the tun device and pumps packets but touches neither the routing table
+nor /etc/resolv.conf. This process is the adapter: it launches the client, feeds the secrets
+in on stdin, reads back one line of JSON describing what the gateway pushed, and translates
+that into the D-Bus types NetworkManager expects.
+
+The division matters more than it looks. Standalone, the client owns the routing table and
+undoes its own work on exit. Under NetworkManager, NM owns it -- and NM can only remove the
+routes it installed. A plugin that quietly ran `ip route add` behind NM's back would leave
+exactly the mess the whole integration is meant to avoid: routes pointing at an interface
+that no longer exists.
+
+Python, and not the C# the rest of the client is written in, for one reason: this file can be
+edited on the machine where it fails. A D-Bus service that is spawned by NetworkManager, runs
+as root and dies quietly is debugged by editing it and reconnecting, not by cross-compiling.
+dbus-python and pygobject ship with Ubuntu's desktop; nothing here has to be installed.
+"""
+
+import ctypes
+import json
+import os
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import threading
+
+import dbus
+import dbus.mainloop.glib
+import dbus.service
+from gi.repository import GLib
+
+BUS_NAME = "org.freedesktop.NetworkManager.fortivpn"
+OBJ_PATH = "/org/freedesktop/NetworkManager/VPN/Plugin"
+IFACE = "org.freedesktop.NetworkManager.VPN.Plugin"
+
+CLIENT = os.environ.get("FORTIVPN_BIN", "/usr/local/bin/fortivpn")
+
+# NMVpnServiceState
+STATE_UNKNOWN = 0
+STATE_INIT = 1
+STATE_SHUTDOWN = 2
+STATE_STARTING = 3
+STATE_STARTED = 4
+STATE_STOPPING = 5
+STATE_STOPPED = 6
+
+# NMVpnPluginFailure
+FAIL_LOGIN = 0
+FAIL_CONNECT = 1
+FAIL_BAD_IP = 2
+
+# Sign-in with a second factor is a human typing a code off a phone, so this is generous.
+CONNECT_TIMEOUT = 90
+
+# Long enough for the client to log the session out of the gateway before we stop being polite.
+TERM_GRACE = 8
+
+# Nothing asked us to do anything; do not sit on the bus name forever.
+IDLE_TIMEOUT = 300
+
+
+def log(message):
+    sys.stderr.write("fortivpn-nm: %s\n" % message)
+    sys.stderr.flush()
+
+
+def ip2int(addr):
+    """NetworkManager wants IPv4 addresses as the in_addr word, i.e. the four network-order
+    bytes read back in host order. Raises OSError on anything that is not an IPv4 address."""
+    return struct.unpack("=I", socket.inet_aton(addr))[0]
+
+
+def _pdeathsig():
+    """PR_SET_PDEATHSIG in the child: if this service dies, the tunnel dies with it.
+
+    Without it, a crash here orphans a running client -- the tunnel stays up, the interface
+    stays up, and NetworkManager believes the connection is gone. That state is confusing to
+    find and can only be cleared by hunting the process down by hand."""
+    try:
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)
+    except Exception:
+        pass
+
+
+class FortiVpnPlugin(dbus.service.Object):
+    def __init__(self, bus_name, loop, persist):
+        super(FortiVpnPlugin, self).__init__(bus_name, OBJ_PATH)
+        self._loop = loop
+        self._persist = persist
+        self._state = STATE_INIT
+        self._proc = None
+        self._timeout = None
+        self._stderr_tail = []
+        self._idle = GLib.timeout_add_seconds(IDLE_TIMEOUT, self._on_idle)
+
+    # ---- properties ------------------------------------------------------
+
+    @dbus.service.method(dbus.PROPERTIES_IFACE, in_signature="ss", out_signature="v")
+    def Get(self, interface, prop):
+        if prop == "State":
+            return dbus.UInt32(self._state)
+        raise dbus.exceptions.DBusException(
+            prop, name="org.freedesktop.DBus.Error.UnknownProperty")
+
+    @dbus.service.method(dbus.PROPERTIES_IFACE, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface):
+        return {"State": dbus.UInt32(self._state)}
+
+    @dbus.service.method(dbus.PROPERTIES_IFACE, in_signature="ssv", out_signature="")
+    def Set(self, interface, prop, value):
+        pass
+
+    # ---- signals ---------------------------------------------------------
+
+    @dbus.service.signal(IFACE, signature="u")
+    def StateChanged(self, state):
+        pass
+
+    @dbus.service.signal(IFACE, signature="a{sv}")
+    def Config(self, config):
+        pass
+
+    @dbus.service.signal(IFACE, signature="a{sv}")
+    def Ip4Config(self, config):
+        pass
+
+    @dbus.service.signal(IFACE, signature="a{sv}")
+    def Ip6Config(self, config):
+        pass
+
+    @dbus.service.signal(IFACE, signature="u")
+    def Failure(self, reason):
+        pass
+
+    @dbus.service.signal(IFACE, signature="s")
+    def LoginBanner(self, banner):
+        pass
+
+    @dbus.service.signal(IFACE, signature="sas")
+    def SecretsRequired(self, message, secrets):
+        pass
+
+    # ---- methods NetworkManager calls -------------------------------------
+
+    @dbus.service.method(IFACE, in_signature="a{sa{sv}}", out_signature="")
+    def Connect(self, connection):
+        self._start(connection)
+
+    @dbus.service.method(IFACE, in_signature="a{sa{sv}}a{sv}", out_signature="")
+    def ConnectInteractive(self, connection, details):
+        # The interactive variant exists so a plugin can ask for a second factor *after* the
+        # gateway challenges for it. We collect the code up front in the auth dialog instead,
+        # so there is nothing extra to ask for and the two paths are the same.
+        self._start(connection)
+
+    @dbus.service.method(IFACE, in_signature="a{sa{sv}}", out_signature="s")
+    def NeedSecrets(self, connection):
+        vpn = connection.get("vpn", {})
+        secrets = dict(vpn.get("secrets", {}))
+        if not str(secrets.get("password", "")):
+            return "vpn"
+        return ""
+
+    @dbus.service.method(IFACE, in_signature="a{sa{sv}}", out_signature="")
+    def NewSecrets(self, connection):
+        if self._proc is None:
+            self._start(connection)
+
+    @dbus.service.method(IFACE, in_signature="", out_signature="")
+    def Disconnect(self):
+        log("Disconnect")
+        self._set_state(STATE_STOPPING)
+        proc = self._proc
+        if proc is None:
+            self._finish(STATE_STOPPED)
+            return
+        # SIGTERM, never SIGKILL. The client handles it as a Ctrl-C: it logs the session out
+        # of the gateway and closes the tun device. A killed client leaves a session open on
+        # the appliance, which counts against the licence seat until it times out.
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+        GLib.timeout_add_seconds(TERM_GRACE, self._force_kill, proc)
+
+    @dbus.service.method(IFACE, in_signature="s", out_signature="")
+    def SetFailure(self, reason):
+        self._fail(FAIL_CONNECT, reason)
+
+    # These three exist because the interface defines them: a separate helper process is the
+    # usual way plugins push config in. We have no helper -- the config arrives on the client's
+    # stdout -- so they simply forward, which keeps the object introspectable and complete.
+    @dbus.service.method(IFACE, in_signature="a{sv}", out_signature="")
+    def SetConfig(self, config):
+        self.Config(config)
+
+    @dbus.service.method(IFACE, in_signature="a{sv}", out_signature="")
+    def SetIp4Config(self, config):
+        self.Ip4Config(config)
+        self._set_state(STATE_STARTED)
+
+    @dbus.service.method(IFACE, in_signature="a{sv}", out_signature="")
+    def SetIp6Config(self, config):
+        self.Ip6Config(config)
+
+    # ---- starting the client ----------------------------------------------
+
+    def _start(self, connection):
+        if self._proc is not None:
+            log("Connect while already running; ignoring")
+            return
+
+        if self._idle:
+            GLib.source_remove(self._idle)
+            self._idle = None
+
+        vpn = connection.get("vpn", {})
+        data = dict((str(k), str(v)) for k, v in dict(vpn.get("data", {})).items())
+        secrets = dict((str(k), str(v)) for k, v in dict(vpn.get("secrets", {})).items())
+
+        gateway = data.get("gateway", "").strip()
+        user = data.get("user", "").strip()
+        cert = data.get("trusted-cert", "").strip()
+        full = data.get("full-tunnel", "").lower() in ("yes", "true", "1", "on")
+        verbose = data.get("verbose", "").lower() in ("yes", "true", "1", "on")
+        password = secrets.get("password", "")
+        otp = secrets.get("otp", "").strip()
+
+        if not gateway or not user:
+            self._fail(FAIL_CONNECT, "the profile has no gateway or no account name")
+            return
+        if not password:
+            self._fail(FAIL_LOGIN, "no password was supplied")
+            return
+        if not os.access(CLIENT, os.X_OK):
+            self._fail(FAIL_CONNECT, "%s is missing or not executable" % CLIENT)
+            return
+
+        argv = [CLIENT, gateway, "--nm", "--secrets-stdin", "-u", user]
+        if cert:
+            argv += ["--trusted-cert", cert]
+        if full:
+            argv.append("--full")
+        if verbose:
+            argv.append("-v")
+
+        # Safe to log in full: the secrets go in on stdin precisely so they are never on a
+        # command line, where /proc would show them to every account on the machine.
+        log("running %s" % " ".join(argv))
+        self._set_state(STATE_STARTING)
+
+        try:
+            self._proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                close_fds=True, universal_newlines=True, bufsize=1,
+                preexec_fn=_pdeathsig)
+        except OSError as e:
+            self._fail(FAIL_CONNECT, "cannot run %s (%s)" % (CLIENT, e))
+            return
+
+        try:
+            self._proc.stdin.write(password + "\n" + otp + "\n")
+            self._proc.stdin.flush()
+        except (IOError, OSError) as e:
+            self._fail(FAIL_CONNECT, "the client closed before reading its secrets (%s)" % e)
+            return
+        finally:
+            try:
+                self._proc.stdin.close()
+            except (IOError, OSError):
+                pass
+            password = None
+            otp = None
+
+        self._stderr_tail = []
+        threading.Thread(target=self._pump_stderr, args=(self._proc,), daemon=True).start()
+        threading.Thread(target=self._pump_stdout, args=(self._proc,), daemon=True).start()
+        self._timeout = GLib.timeout_add_seconds(CONNECT_TIMEOUT, self._on_timeout)
+
+    def _pump_stdout(self, proc):
+        """The client's stdout is a machine channel: one line of JSON when the tunnel is up.
+
+        Runs on its own thread because it blocks, and hands everything back to the main loop
+        with idle_add -- dbus-python signals must be emitted from the thread the loop runs on."""
+        config = None
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                if config is None and line.startswith("{"):
+                    try:
+                        config = json.loads(line)
+                    except ValueError as e:
+                        log("could not parse the config line (%s)" % e)
+                        continue
+                    GLib.idle_add(self._on_config, config)
+                else:
+                    log("client: %s" % line)
+        except (IOError, OSError, ValueError) as e:
+            log("stdout ended (%s)" % e)
+        code = proc.wait()
+        GLib.idle_add(self._on_exit, code, config is not None)
+
+    def _pump_stderr(self, proc):
+        """Everything a person would have read on a terminal. Kept as a short tail so a
+        failure can be reported with the gateway's own wording rather than an exit code."""
+        try:
+            for line in proc.stderr:
+                line = line.rstrip()
+                if not line:
+                    continue
+                log("client: %s" % line)
+                self._stderr_tail.append(line)
+                del self._stderr_tail[:-20]
+        except (IOError, OSError):
+            pass
+
+    # ---- translating the config -------------------------------------------
+
+    def _on_config(self, cfg):
+        if self._timeout:
+            GLib.source_remove(self._timeout)
+            self._timeout = None
+
+        try:
+            tundev = str(cfg["tundev"])
+            address = ip2int(str(cfg["address"]))
+            gateway = ip2int(str(cfg["gateway"]))
+            prefix = int(cfg.get("prefix", 32))
+            mtu = int(cfg.get("mtu", 1354))
+        except (KeyError, ValueError, TypeError, OSError) as e:
+            self._fail(FAIL_BAD_IP, "the client reported a config we cannot use (%s)" % e)
+            return False
+
+        # "gateway" here is the *external* one -- the appliance's own address on the real
+        # uplink. NetworkManager pins a host route to it, which is what stops the encrypted
+        # tunnel from being routed into itself once the default route points at the VPN.
+        self.Config({
+            "tundev": dbus.String(tundev),
+            "gateway": dbus.UInt32(gateway),
+            "mtu": dbus.UInt32(mtu),
+            "has-ip4": dbus.Boolean(True),
+            "has-ip6": dbus.Boolean(False),
+        })
+
+        ip4 = {
+            "tundev": dbus.String(tundev),
+            "address": dbus.UInt32(address),
+            "prefix": dbus.UInt32(prefix),
+            "gateway": dbus.UInt32(gateway),
+            "mtu": dbus.UInt32(mtu),
+            "never-default": dbus.Boolean(bool(cfg.get("never_default", True))),
+        }
+
+        try:
+            dns = [dbus.UInt32(ip2int(str(d))) for d in cfg.get("dns", []) if d]
+        except OSError as e:
+            log("ignoring an unusable DNS server (%s)" % e)
+            dns = []
+        if dns:
+            ip4["dns"] = dbus.Array(dns, signature="u")
+
+        domains = [str(d) for d in cfg.get("domains", []) if d]
+        if domains:
+            ip4["domains"] = dbus.Array([dbus.String(d) for d in domains], signature="s")
+
+        routes = []
+        for r in cfg.get("routes", []):
+            try:
+                # dest, prefix, next hop, metric. Next hop 0 means "out of the tunnel
+                # interface", which is the only answer that makes sense here.
+                routes.append(dbus.Array([
+                    dbus.UInt32(ip2int(str(r["network"]))),
+                    dbus.UInt32(int(r["prefix"])),
+                    dbus.UInt32(0),
+                    dbus.UInt32(0),
+                ], signature="u"))
+            except (KeyError, ValueError, TypeError, OSError) as e:
+                log("skipping an unusable route %r (%s)" % (r, e))
+        if routes:
+            ip4["routes"] = dbus.Array(routes, signature="au")
+
+        log("tunnel up on %s, %s, %d route(s)"
+            % (tundev, cfg.get("address"),
+               len(routes) if routes else (0 if ip4["never-default"] else 1)))
+
+        self.Ip4Config(ip4)
+        self._set_state(STATE_STARTED)
+        return False
+
+    # ---- endings ----------------------------------------------------------
+
+    def _on_timeout(self):
+        self._timeout = None
+        log("no config after %d seconds" % CONNECT_TIMEOUT)
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        self._fail(FAIL_CONNECT, "the gateway did not answer in time")
+        return False
+
+    def _on_exit(self, code, had_config):
+        self._proc = None
+        if self._timeout:
+            GLib.source_remove(self._timeout)
+            self._timeout = None
+
+        if self._state in (STATE_STOPPING, STATE_STOPPED):
+            self._finish(STATE_STOPPED)
+            return False
+
+        if not had_config:
+            # Exit 3 is the client's way of saying the gateway rejected the sign-in, as
+            # opposed to anything else going wrong. NetworkManager treats the two very
+            # differently: only a rejected sign-in should send the user back to the password
+            # box, or a flapping link becomes an endless prompt.
+            self._fail(FAIL_LOGIN if code == 3 else FAIL_CONNECT, self._last_error(code))
+            return False
+
+        log("the tunnel ended on its own (exit %d)" % code)
+        self._finish(STATE_STOPPED)
+        return False
+
+    def _force_kill(self, proc):
+        if proc.poll() is None:
+            log("the client did not stop in %d seconds; killing it" % TERM_GRACE)
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        return False
+
+    def _last_error(self, code):
+        for line in reversed(self._stderr_tail):
+            if "failed" in line or "error" in line:
+                return line
+        return "the client exited with status %d" % code
+
+    def _fail(self, reason, message):
+        log("failed: %s" % message)
+        self.Failure(dbus.UInt32(reason))
+        self._finish(STATE_STOPPED)
+
+    def _finish(self, state):
+        self._set_state(state)
+        if not self._persist:
+            # Let NetworkManager see the state change before the bus name goes away.
+            GLib.timeout_add_seconds(2, self._quit)
+
+    def _set_state(self, state):
+        if state == self._state:
+            return
+        self._state = state
+        self.StateChanged(dbus.UInt32(state))
+
+    def _on_idle(self):
+        self._idle = None
+        if self._state == STATE_INIT and self._proc is None:
+            log("nothing asked for a connection in %d seconds; exiting" % IDLE_TIMEOUT)
+            self._quit()
+        return False
+
+    def _quit(self):
+        self._loop.quit()
+        return False
+
+    def shutdown(self):
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=TERM_GRACE)
+            except Exception:
+                pass
+
+
+def main():
+    argv = sys.argv[1:]
+    persist = "--persist" in argv
+    bus_name = BUS_NAME
+    if "--bus-name" in argv:
+        try:
+            bus_name = argv[argv.index("--bus-name") + 1]
+        except IndexError:
+            log("--bus-name given without a name")
+            return 2
+
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    try:
+        bus = dbus.SystemBus()
+    except dbus.exceptions.DBusException as e:
+        log("cannot reach the system bus (%s)" % e)
+        return 1
+
+    try:
+        # Kept in a variable on purpose. dbus-python releases the name when the BusName object
+        # is collected, so discarding it here would hand the name back at the next garbage
+        # collection -- intermittently, and long after the code that looked wrong.
+        name = dbus.service.BusName(bus_name, bus, do_not_queue=True)
+    except dbus.exceptions.NameExistsException:
+        log("another instance already owns %s" % bus_name)
+        return 1
+
+    loop = GLib.MainLoop()
+    plugin = FortiVpnPlugin(name, loop, persist)
+
+    def stop(*_):
+        plugin.shutdown()
+        loop.quit()
+
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, stop)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, stop)
+
+    log("ready on %s" % bus_name)
+    loop.run()
+    plugin.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

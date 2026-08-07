@@ -128,20 +128,74 @@ Disconnect sends **SIGINT**, not SIGKILL — the client treats it as Ctrl-C and 
 teardown, so routes and `/etc/resolv.conf` are restored and the gateway session is logged
 out. A killed client would leave the routing table pointing at an interface that is gone.
 
-### The alternative: NetworkManager's own plugin
+## In Ubuntu's own network settings
 
-Ubuntu also ships a plugin for this protocol, wrapping openfortivpn:
+Everything above is still an application with an icon. `linux/nm/` goes one step further and
+makes the tunnel a **NetworkManager VPN connection**, driven by this client — not by
+openfortivpn. Run it after `install.sh`:
 
-    sudo apt install network-manager-fortisslvpn-gnome
+    cd nm && sudo ./install-nm.sh
 
-**Settings > Network > VPN > +** then offers "Fortinet SSLVPN". This lands in the actual
-GNOME VPN panel, which the installer above does not — appearing in that `+` list requires a
-GTK properties module in C, and there is no way to reuse this repo's C# for it.
+Afterwards **FortiGate VPN** is in **Settings → Network**, with a switch in the top-bar menu,
+the padlock in the panel while it is up, and an autoconnect option:
 
-What it costs: it is openfortivpn's login, not ours. FortiToken/OTP handling has
-historically been that plugin's weak spot and this gateway's accounts use one, so verify a
-`ret=2` challenge completes before relying on it. The installer above uses the exact 2FA
-path the Windows plugin already proves against this gateway.
+    nmcli connection modify id 'FortiGate VPN' connection.autoconnect yes
+
+### What NetworkManager actually needs
+
+A VPN type is a process on the system bus answering
+`org.freedesktop.NetworkManager.VPN.Plugin`. NM asks it to `Connect` with a profile and its
+secrets; it answers with a `Config` and an `Ip4Config` signal and a state change to
+**started**. Everything visible in the desktop follows from that one exchange.
+
+| | |
+| --- | --- |
+| `/usr/libexec/nm-fortivpn-service` | the D-Bus service. Runs `fortivpn --nm`, feeds it the secrets on stdin, reads back the tunnel config and translates it for NM. |
+| `/usr/libexec/nm-fortivpn-auth-dialog` | what draws the password and one-time code prompt. GNOME renders it natively through `--external-ui-mode`; zenity is the fallback. |
+| `/usr/lib/NetworkManager/VPN/nm-fortivpn-service.name` | how NM learns the type exists. |
+| `/usr/share/dbus-1/system.d/nm-fortivpn-service.conf` | lets root own that bus name. Without it the service exits and NM reports only that it "appeared to die". |
+| `/etc/NetworkManager/system-connections/fortivpn.nmconnection` | the profile itself. Root-owned, `0600`. |
+
+### Why the client needed a `--nm` mode
+
+The two integrations disagree about who owns the routing table. Standalone, `RouteManager`
+configures it and undoes its own work on exit, which is right when nothing else is watching.
+Under NetworkManager it is wrong: **NM applies the address, routes and DNS, and NM can only
+remove what NM installed.** A plugin running `ip route add` behind its back would leave
+exactly the wreckage the integration exists to prevent — routes pointing at an interface that
+is gone.
+
+So `--nm` stops the client at "the tun device exists and carries packets" and prints what the
+gateway pushed as one line of JSON on stdout. The service turns that into the D-Bus types NM
+wants, including the *external* gateway address, which is how NM knows to pin a host route to
+the real uplink so the encrypted tunnel is not routed into itself.
+
+The second factor needs no C. The auth dialog is a plain executable with a line-oriented
+protocol, not a shared object, so it reuses this repo's own 2FA path — the one the Windows
+plugin proves against this gateway — rather than openfortivpn's, whose OTP handling has
+historically been its weak spot.
+
+### What is still missing
+
+The type does **not** appear under **Settings → Network → +**. That list is built from a
+`properties=` key naming a GTK shared object, and that genuinely has to be C/GObject; there is
+no way to reuse this repo's C# for it. Every other part of the panel works, because a profile
+that already exists needs no editor — which is why `install-nm.sh` writes the profile instead
+of asking you to create one.
+
+To change the gateway or account later, edit the profile rather than the panel:
+
+    sudo nmcli connection modify id 'FortiGate VPN' +vpn.data 'gateway=vpn.example.com:<port>'
+
+The Python is deliberate. A D-Bus service spawned by NetworkManager, running as root, that
+dies quietly is debugged by editing it in place on the machine where it failed — not by
+cross-compiling. `python3-dbus` and `python3-gi` ship with Ubuntu's desktop.
+
+### The alternative we did not take
+
+Ubuntu also ships `network-manager-fortisslvpn-gnome`, which wraps openfortivpn and does
+appear under `+`. It is openfortivpn's login rather than ours, including its 2FA, which is
+the part this gateway exercises hardest.
 
 ## The macOS desktop — possible, but behind Apple's paywall
 
