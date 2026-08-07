@@ -1,0 +1,106 @@
+#!/bin/sh
+# The unprivileged half: what the desktop icon actually runs. It collects the password and
+# one-time code from the user, hands them to the privileged helper through pkexec, and
+# reports the outcome -- no terminal anywhere in that path.
+#
+# It is a toggle. Launch it with the tunnel down and it connects; launch it with the tunnel
+# up and it offers to disconnect. That is the whole interface, because a single icon in the
+# app grid cannot show two.
+#
+# Secrets are read straight into the pipe feeding pkexec. They are never put in a variable
+# that gets exported, never passed as an argument, and never written to disk.
+
+set -eu
+
+SESSION=/usr/libexec/fortivpn-session
+CONF=/etc/fortivpn/gateway.conf
+LOG=/var/log/fortivpn.log
+TITLE="FortiGate VPN"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Every message goes through a dialog. Anything printed to stdout here is invisible: the
+# .desktop entry runs with Terminal=false, so there is nobody reading it.
+say()  { zenity --info     --title="$TITLE" --width=340 --text="$1" 2>/dev/null || true; }
+fail() { zenity --error    --title="$TITLE" --width=420 --text="$1" 2>/dev/null || true; exit 1; }
+ask()  { zenity --question --title="$TITLE" --width=340 --text="$1" 2>/dev/null; }
+
+have zenity || {
+    echo "zenity is required" >&2
+    exit 1
+}
+[ -x "$SESSION" ] || fail "The VPN helper is not installed.\n\nRun <tt>sudo ./install.sh</tt> again."
+[ -r "$CONF" ]    || fail "No gateway is configured.\n\nRun <tt>sudo ./install.sh</tt> to set one up."
+
+# ---- disconnect ----------------------------------------------------------------
+
+if pkexec "$SESSION" status 2>/dev/null; then
+    ask "The VPN is connected.\n\nDisconnect now?" || exit 0
+    if pkexec "$SESSION" down 2>/dev/null; then
+        say "Disconnected."
+    else
+        fail "Could not disconnect. The tunnel may still be up."
+    fi
+    exit 0
+fi
+
+# ---- connect -------------------------------------------------------------------
+
+# Two dialogs rather than one --forms with both fields: --forms joins its answers with a
+# separator character, and a password containing that character would be silently split in
+# the wrong place. Asking twice costs one click and cannot corrupt the password.
+password=$(zenity --password --title="$TITLE" 2>/dev/null) || exit 0
+
+# Asked unconditionally because whether the account carries a second factor is the
+# gateway's decision, made mid-login -- there is nothing to read here that would tell us in
+# advance. An empty answer is fine for an account without one.
+otp=$(zenity --entry --title="$TITLE" --width=340 \
+        --text="One-time code from your token app.\nLeave blank if your account has none." \
+        2>/dev/null) || exit 0
+
+rc_file=$(mktemp)
+trap 'rm -f "$rc_file"' EXIT INT TERM
+
+# Watch the client's log rather than polling the helper: pkexec per poll would be both slow
+# and noisy, and the log already says exactly what happened. "Tunnel is up." is the client's
+# own success line; the failure patterns are the two ways it reports giving up.
+wait_for_tunnel() {
+    _n=0
+    while [ "$_n" -lt 60 ]; do
+        if grep -q 'Tunnel is up' "$LOG" 2>/dev/null; then return 0; fi
+        if grep -qE 'connect failed|^error:' "$LOG" 2>/dev/null; then return 1; fi
+        sleep 0.5
+        _n=$((_n + 1))
+    done
+    return 1   # 30s: past this the gateway is not answering
+}
+
+if ! printf '%s\n%s\n' "$password" "$otp" | pkexec "$SESSION" up 2>/dev/null; then
+    fail "Could not start the VPN.\n\nAuthorisation was refused, or the helper failed to launch."
+fi
+password=; otp=
+
+# if/else rather than capturing $?: wait_for_tunnel returning 1 is a failing command, and
+# under set -e the subshell would die before writing the result -- turning every failed
+# connection into a silent hang instead of an error dialog.
+( if wait_for_tunnel; then printf '0' > "$rc_file"; else printf '1' > "$rc_file"; fi ) &
+worker=$!
+
+# --no-cancel: cancelling this dialog would only hide it. The tunnel is already being
+# brought up by a root process the dialog has no way to stop, and offering a button that
+# does nothing is worse than offering none.
+( while kill -0 "$worker" 2>/dev/null; do printf '#Connecting to the gateway ...\n'; sleep 0.5; done ) |
+    zenity --progress --pulsate --auto-close --no-cancel \
+           --title="$TITLE" --width=340 --text="Connecting to the gateway ..." 2>/dev/null || true
+
+wait "$worker" 2>/dev/null || true
+
+if [ "$(cat "$rc_file" 2>/dev/null)" = "0" ]; then
+    ip=$(grep -o 'IP [0-9.]*' "$LOG" 2>/dev/null | head -n1 | cut -d' ' -f2)
+    have notify-send && notify-send -i network-vpn "$TITLE" "Connected${ip:+ — $ip}" || true
+    say "Connected${ip:+ as <b>$ip</b>}.\n\nLaunch this again to disconnect."
+else
+    pkexec "$SESSION" down 2>/dev/null || true
+    detail=$(tail -n 12 "$LOG" 2>/dev/null | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+    fail "Could not connect.\n\n<tt>${detail:-no output}</tt>"
+fi

@@ -35,6 +35,15 @@ The result is `out/cli-<rid>/fortivpn`. Copy that one file to the target machine
 
 ## Use
 
+On **macOS**, clear the quarantine flag first. The binaries are not signed by an Apple
+developer account, so a download from a browser or `curl` is refused by Gatekeeper with
+"cannot be opened because the developer cannot be verified" — a dialog with no override
+button, which reads like a corrupt file rather than a policy:
+
+    xattr -d com.apple.quarantine fortivpn-osx-arm64
+
+Then:
+
     sudo ./fortivpn vpn.example.com:<port>
 
 Use the **same host and port you type in the Windows profile** (`https://vpn.example.com:<port>`).
@@ -81,37 +90,60 @@ exit; a box running `systemd-resolved`/`resolvconf` may reassert its own, in whi
 DNS through that. On macOS DNS is not changed automatically — if office names do not resolve,
 `sudo networksetup -setdnsservers Wi-Fi <server> ...` and clear it with `... Wi-Fi empty`.
 
-## The desktop VPN panel
+## The Linux desktop, without a terminal
 
-Both systems have a built-in VPN page, like Windows' Settings > Network & internet > VPN.
-How far a FortiGate SSL-VPN can be pushed into them differs sharply.
+Everything above is the CLI. Nobody should have to run it that way, and `linux/` turns it
+into an application: one command to install, then an icon.
 
-### Ubuntu / GNOME — yes, through NetworkManager
+    tar xzf fortivpn-linux-x64.tar.gz
+    cd fortivpn && sudo ./install.sh
 
-The VPN section of GNOME Settings is **NetworkManager**, and NetworkManager takes VPN
-plugins the way Windows takes a VPN provider. Debian and Ubuntu already ship one for this
-protocol, wrapping openfortivpn:
+The installer does, itself, every step this document otherwise asks a person to perform —
+pick the binary for the CPU, put it on the path, read the gateway certificate over TLS and
+pin its fingerprint, write the config, register the desktop entry. It asks two questions
+(gateway, account name) and **never asks for the VPN password**: that is typed at connect
+time and stored nowhere.
+
+Afterwards **FortiGate VPN** is in the applications list. Clicking it connects; clicking it
+again disconnects. No terminal, and no `sudo` per connection.
+
+`sudo ./install.sh --uninstall` removes it, tearing down a live tunnel first.
+
+### How the no-sudo part works
+
+Four pieces, and the split between the first two is the whole security argument:
+
+| | |
+| --- | --- |
+| `/usr/libexec/fortivpn-session` | the privileged half. Takes **no** gateway, account or options from its caller — it reads them from root-owned `/etc/fortivpn/gateway.conf`. Secrets arrive on stdin. |
+| `/usr/local/bin/fortivpn-gui` | the unprivileged half. Collects the password and one-time code with `zenity` and pipes them to the helper through `pkexec`. |
+| `org.fortivpn.session.policy` | the polkit action. `allow_active=yes`, the same answer NetworkManager gives for `network-control`. |
+| `fortivpn.desktop` | what puts it in the applications list. |
+
+`allow_active=yes` grants the logged-in user one power: toggling *this* tunnel. It is not a
+route to a root shell, because the helper accepts nothing from the caller that would change
+what it runs. Remote and switched-away sessions still have to authenticate as an admin.
+
+Disconnect sends **SIGINT**, not SIGKILL — the client treats it as Ctrl-C and runs its
+teardown, so routes and `/etc/resolv.conf` are restored and the gateway session is logged
+out. A killed client would leave the routing table pointing at an interface that is gone.
+
+### The alternative: NetworkManager's own plugin
+
+Ubuntu also ships a plugin for this protocol, wrapping openfortivpn:
 
     sudo apt install network-manager-fortisslvpn-gnome
 
-Then **Settings > Network > VPN > +** offers "Fortinet SSLVPN". Fill in the gateway
-(`vpn.example.com`, and the port your Windows profile uses) and your account name.
+**Settings > Network > VPN > +** then offers "Fortinet SSLVPN". This lands in the actual
+GNOME VPN panel, which the installer above does not — appearing in that `+` list requires a
+GTK properties module in C, and there is no way to reuse this repo's C# for it.
 
-Two things this buys that the CLI cannot:
+What it costs: it is openfortivpn's login, not ours. FortiToken/OTP handling has
+historically been that plugin's weak spot and this gateway's accounts use one, so verify a
+`ret=2` challenge completes before relying on it. The installer above uses the exact 2FA
+path the Windows plugin already proves against this gateway.
 
-- The connection is dialled from the desktop, including the top-bar switch.
-- **No `sudo` per connection.** Installing needs root once; after that the NetworkManager
-  daemon (already root) does the work and polkit authorises your desktop user. This is the
-  closest thing on Linux to the Windows plugin's no-administrator property.
-
-**Check the second factor before relying on it.** The stock plugin's handling of FortiToken
-/ OTP accounts has historically been the weak spot, and this gateway's accounts use one. If
-the GUI cannot complete a `ret=2` challenge, `fortivpn` above still signs in — and the
-fallback is a NetworkManager plugin of our own wrapping this client, which reuses the exact
-2FA code the Windows plugin already proves against this gateway. Not written yet: it is
-worth knowing whether the stock one suffices first.
-
-### macOS — possible, but behind Apple's paywall
+## The macOS desktop — possible, but behind Apple's paywall
 
 macOS's built-in VPN types (IKEv2, L2TP/IPsec) are the native IKE stack and cannot carry
 this protocol, so there is no shortcut through them. Appearing in **System Settings > VPN**

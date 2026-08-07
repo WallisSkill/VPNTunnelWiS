@@ -1,0 +1,10 @@
+# The shell scripts under linux/ are checked out on Ubuntu and run by /bin/sh. They are
+# authored on Windows, and a CRLF checkout makes the kernel read the shebang as
+# "/bin/sh\r" -- the script dies with "bad interpreter: No such file or directory", which
+# says nothing about line endings. Pin them to LF regardless of core.autocrlf.
+linux/** text eol=lf
+*.sh text eol=lf
+
+# PowerShell is fine either way, but keep the Windows tooling on CRLF explicitly rather
+# than at the mercy of whoever cloned it.
+*.ps1 text eol=crlf

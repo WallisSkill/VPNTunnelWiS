@@ -18,7 +18,8 @@ internal sealed class RouteManager
 {
     private readonly Action<string> _log;
     private readonly List<string[]> _undo = new();
-    private string? _dnsBackup;   // Linux: saved /etc/resolv.conf contents
+    private string? _dnsBackup;   // Linux: saved /etc/resolv.conf contents, when it was a real file
+    private string? _dnsLink;     // Linux: its symlink target instead, when it was a symlink
 
     public RouteManager(Action<string> log) => _log = log;
 
@@ -112,11 +113,22 @@ internal sealed class RouteManager
             // Plainest reliable path: replace /etc/resolv.conf and restore on teardown. Boxes
             // running systemd-resolved or resolvconf may reassert their own; that is documented.
             const string path = "/etc/resolv.conf";
-            _dnsBackup = System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : null;
+
+            // Usually it is a symlink, and writing through one edits the wrong file entirely:
+            // systemd-resolved points it at /run/systemd/resolve/stub-resolv.conf, and WSL at
+            // /mnt/wsl/resolv.conf, which every distro on the machine shares. Replace the link
+            // with a real file and put the link back on teardown.
+            _dnsLink = new System.IO.FileInfo(path).LinkTarget;
+            _dnsBackup = _dnsLink is null && System.IO.File.Exists(path)
+                ? System.IO.File.ReadAllText(path)
+                : null;
+            if (_dnsLink is not null) System.IO.File.Delete(path);
+
             var lines = cfg.DnsServers.Select(s => $"nameserver {s}").ToList();
             if (cfg.DnsSuffixes.Count > 0) lines.Insert(0, "search " + string.Join(' ', cfg.DnsSuffixes));
             System.IO.File.WriteAllText(path, string.Join('\n', lines) + "\n");
-            _log($"  DNS -> {string.Join(",", cfg.DnsServers)} (backed up {path})");
+            _log($"  DNS -> {string.Join(",", cfg.DnsServers)}" +
+                 (_dnsLink is null ? $" (backed up {path})" : $" (was a symlink to {_dnsLink})"));
         }
         catch (Exception e)
         {
@@ -177,7 +189,19 @@ internal sealed class RouteManager
         foreach (var cmd in Enumerable.Reverse(_undo).ToList())
             Do(cmd[0], cmd.Skip(1).ToArray());
 
-        if (_dnsBackup is not null)
+        if (_dnsLink is not null)
+        {
+            // Put the symlink back exactly as it was, or the machine is left with a frozen
+            // resolv.conf that no longer tracks systemd-resolved (or WSL) after we are gone.
+            try
+            {
+                System.IO.File.Delete("/etc/resolv.conf");
+                System.IO.File.CreateSymbolicLink("/etc/resolv.conf", _dnsLink);
+                _log($"  DNS restored (symlink to {_dnsLink})");
+            }
+            catch (Exception e) { _log($"  could not restore the /etc/resolv.conf symlink ({e.Message})"); }
+        }
+        else if (_dnsBackup is not null)
         {
             try { System.IO.File.WriteAllText("/etc/resolv.conf", _dnsBackup); _log("  DNS restored"); }
             catch (Exception e) { _log($"  could not restore /etc/resolv.conf ({e.Message})"); }

@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -113,6 +114,13 @@ internal static class Program
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, ev) => { ev.Cancel = true; cts.Cancel(); };
+
+        // SIGTERM too, not just Ctrl-C. Anything that supervises this process -- the desktop
+        // integration's Disconnect button, systemd, a logout -- stops it with a signal rather
+        // than a keystroke, and without this the teardown below never runs: the routes and
+        // /etc/resolv.conf would be left rewritten with the tunnel gone.
+        using var sigterm = PosixSignalRegistration.Create(
+            PosixSignal.SIGTERM, ctx => { ctx.Cancel = true; cts.Cancel(); });
 
         try
         {

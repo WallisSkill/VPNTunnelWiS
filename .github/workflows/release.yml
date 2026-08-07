@@ -50,10 +50,26 @@ jobs:
       - name: Name the binary after its target
         run: mv out/cli-${{ matrix.rid }}/fortivpn out/fortivpn-${{ matrix.rid }}
 
+      # Linux gets a second asset: the binary plus the desktop integration in one tarball,
+      # so installing is download-extract-one-command instead of a list of steps. It has to
+      # be a tar and not the zip the artifact upload would give, because zip carries no
+      # permission bits -- the scripts and the client must arrive executable, and the whole
+      # point of this bundle is that nobody has to be told to chmod anything.
+      - name: Bundle the Ubuntu installer
+        if: startsWith(matrix.rid, 'linux')
+        run: |
+          mkdir -p pkg/fortivpn
+          cp out/fortivpn-${{ matrix.rid }} pkg/fortivpn/
+          cp linux/install.sh linux/fortivpn-session linux/fortivpn-gui \
+             linux/org.fortivpn.session.policy linux/fortivpn.desktop pkg/fortivpn/
+          chmod +x pkg/fortivpn/install.sh pkg/fortivpn/fortivpn-session \
+                   pkg/fortivpn/fortivpn-gui pkg/fortivpn/fortivpn-${{ matrix.rid }}
+          tar -C pkg -czf out/fortivpn-${{ matrix.rid }}.tar.gz fortivpn
+
       - uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.rid }}
-          path: out/fortivpn-${{ matrix.rid }}
+          path: out/fortivpn-${{ matrix.rid }}*
 
   build:
     # Windows only, and not by preference: the build needs cl.exe with the C++ toolset,
@@ -136,27 +152,53 @@ jobs:
           That is what lets Windows register an unsigned package, and turning it on does
           not need an administrator either.
 
-          ## macOS and Linux
+          The installer is unsigned, so SmartScreen will stop it the first time with
+          "Windows protected your PC" — choose **More info** then **Run anyway**.
 
-          The plugin is Windows-only, so these systems get their own client speaking the
-          same SSL-VPN protocol. Download the one for your machine, make it executable and
-          run it:
+          ## Linux desktop (Ubuntu, and anything else with GNOME/KDE)
+
+          Download **`fortivpn-linux-x64.tar.gz`** (or `-arm64` on ARM), unpack it and run
+          the installer once:
+
+          ```
+          tar xzf fortivpn-linux-x64.tar.gz
+          cd fortivpn && sudo ./install.sh
+          ```
+
+          It asks for the gateway and your account name, works out the gateway
+          certificate's fingerprint and pins it for you, and registers a **FortiGate VPN**
+          entry in your applications. After that there is no terminal and no `sudo`: click
+          it to connect, click it again to disconnect. The password and one-time code are
+          typed into the desktop prompt and are never stored.
+
+          Remove it with `sudo ./install.sh --uninstall`.
+
+          ## macOS, or Linux without a desktop
+
+          The bare client, run by hand:
 
           | file | for |
           | --- | --- |
-          | `fortivpn-linux-x64` | Linux, Intel/AMD |
-          | `fortivpn-linux-arm64` | Linux, ARM |
           | `fortivpn-osx-arm64` | macOS, Apple Silicon |
           | `fortivpn-osx-x64` | macOS, Intel |
+          | `fortivpn-linux-x64` | Linux, Intel/AMD |
+          | `fortivpn-linux-arm64` | Linux, ARM |
 
           ```
-          chmod +x fortivpn-linux-x64
-          sudo ./fortivpn-linux-x64 vpn.example.com:PORT
+          chmod +x fortivpn-osx-arm64
+          sudo ./fortivpn-osx-arm64 vpn.example.com:PORT
           ```
 
-          Nothing to install: the runtime is inside the binary. It does need **sudo** —
-          opening a tunnel interface and setting routes requires root there, so the
-          no-administrator property is specific to the Windows plugin. See
+          On **macOS** the download is quarantined and Gatekeeper will refuse to run it —
+          these binaries are not signed by an Apple developer account. Clear the flag once:
+
+          ```
+          xattr -d com.apple.quarantine fortivpn-osx-arm64
+          ```
+
+          Nothing to install either way: the runtime is inside the binary. It does need
+          **sudo** — opening a tunnel interface and setting routes requires root there, so
+          the no-administrator property is specific to the Windows plugin. See
           [docs/mac-linux.md](docs/mac-linux.md) for the options, certificate pinning and
           DNS notes.
           NOTES
@@ -170,15 +212,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # The .exe first, so it is the asset listed at the top of the release; the
-          # macOS/Linux clients after the zip. -ErrorAction on the last pattern only:
-          # a missing fortivpn-* means the cli job produced nothing, which the count
-          # check below turns into a failure rather than a quietly short release.
-          $assets = @(Get-ChildItem out\*.exe, out\*.zip, out\fortivpn-* -ErrorAction SilentlyContinue |
-                      ForEach-Object FullName)
-          if (-not $assets) { throw "No assets in out\ -- the build steps produced nothing." }
-          $clients = @($assets | Where-Object { $_ -match 'fortivpn-' }).Count
-          if ($clients -ne 4) { throw "Expected 4 client binaries, found $clients." }
+          # Named explicitly rather than globbed. A glob that silently matches three files
+          # instead of four still publishes a release, just a broken one; naming what must
+          # be there turns a missing target into a failed build with the target in the
+          # message.
+          $expected  = @('linux-x64','linux-arm64','osx-x64','osx-arm64' |
+                         ForEach-Object { "out\fortivpn-$_" })
+          $expected += @('linux-x64','linux-arm64' |
+                         ForEach-Object { "out\fortivpn-$_.tar.gz" })
+
+          $missing = @($expected | Where-Object { -not (Test-Path $_) })
+          if ($missing) { throw "The cli job did not produce: $($missing -join ', ')" }
+
+          # The .exe first, so it is the asset listed at the top of the release page, then
+          # the zip, then the macOS/Linux downloads.
+          $windows = @(Get-ChildItem out\*.exe, out\*.zip -ErrorAction SilentlyContinue |
+                       ForEach-Object FullName)
+          if (-not $windows) { throw "No installer or zip in out\ -- the Windows build produced nothing." }
+
+          $assets = $windows + @($expected | ForEach-Object { (Resolve-Path $_).Path })
           $assets | ForEach-Object { Write-Host "asset: $_" }
 
           # $assets, not @assets: passing an array to a native command already spreads it

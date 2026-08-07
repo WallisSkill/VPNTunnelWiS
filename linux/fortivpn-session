@@ -1,0 +1,94 @@
+#!/bin/sh
+# The privileged half of the desktop integration. Runs as root through pkexec, and is the
+# ONLY thing the polkit rule lets an unprivileged user start -- which is why it takes no
+# gateway, no account and no options from the caller. Everything it needs comes from the
+# root-owned config file, so being allowed to run this grants exactly one power: bringing
+# the configured tunnel up or down. It does not grant a shell.
+#
+#     fortivpn-session up       read password (line 1) and one-time code (line 2) from
+#                               stdin, start the tunnel in the background, return at once
+#     fortivpn-session down     stop it and let the client tear its own routes back down
+#     fortivpn-session status   exit 0 if the tunnel is up
+#
+# Secrets arrive on stdin and are held only in shell variables. They are never written to
+# the log, the config file, or a command line -- printf is a shell builtin, so the password
+# never appears in /proc as an argument.
+
+set -eu
+
+CONF=/etc/fortivpn/gateway.conf
+PIDFILE=/run/fortivpn.pid
+LOG=/var/log/fortivpn.log
+BIN=/usr/local/bin/fortivpn
+
+die() { echo "fortivpn-session: $*" >&2; exit 1; }
+
+# The recorded pid, but only when it is still a live process. A stale pidfile after a crash
+# or a reboot would otherwise make "up" refuse forever, and could match an unrelated process
+# that inherited the number.
+running_pid() {
+    [ -f "$PIDFILE" ] || return 1
+    _pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+    [ -n "$_pid" ] || return 1
+    kill -0 "$_pid" 2>/dev/null || { rm -f "$PIDFILE"; return 1; }
+    echo "$_pid"
+}
+
+cmd_status() { running_pid >/dev/null; }
+
+cmd_up() {
+    [ -r "$CONF" ] || die "not configured -- run install.sh first"
+    [ -x "$BIN" ]  || die "$BIN is missing"
+    if running_pid >/dev/null; then die "already connected"; fi
+
+    # shellcheck disable=SC1090
+    . "$CONF"
+    [ -n "${GATEWAY:-}" ] || die "GATEWAY is not set in $CONF"
+
+    IFS= read -r _password || _password=
+    IFS= read -r _otp      || _otp=
+
+    # Written as if-blocks, not "[ ... ] && set --": a false test is a failing command, and
+    # under set -e an unset VPN_USER would end the script here rather than skip a flag.
+    set -- "$GATEWAY" --password-stdin
+    if [ -n "${VPN_USER:-}" ];     then set -- "$@" -u "$VPN_USER"; fi
+    if [ -n "${TRUSTED_CERT:-}" ]; then set -- "$@" --trusted-cert "$TRUSTED_CERT"; fi
+    if [ "${FULL_TUNNEL:-no}" = "yes" ]; then set -- "$@" --full; fi
+
+    : > "$LOG"; chmod 644 "$LOG"
+
+    # nohup execs, so $! really is the client's pid and not a wrapper's. Both secrets go in
+    # as two lines: the client reads the first for --password-stdin, and the second only if
+    # the gateway actually issues a second-factor challenge.
+    printf '%s\n%s\n' "$_password" "$_otp" | nohup "$BIN" "$@" >>"$LOG" 2>&1 &
+    echo $! > "$PIDFILE"
+    chmod 644 "$PIDFILE"
+}
+
+cmd_down() {
+    _pid=$(running_pid) || { echo "not connected"; return 0; }
+
+    # SIGINT, deliberately: the client treats it as Ctrl-C and runs its teardown -- routes
+    # removed, /etc/resolv.conf restored, session logged out at the gateway. SIGKILL would
+    # leave the machine with a rewritten routing table pointing at an interface that is gone.
+    kill -INT "$_pid" 2>/dev/null || true
+    _n=0
+    while kill -0 "$_pid" 2>/dev/null && [ "$_n" -lt 100 ]; do
+        sleep 0.1
+        _n=$((_n + 1))
+    done
+    # Only after ten seconds of refusing to go, and it is worth saying so: this is the case
+    # where routes may survive the process.
+    if kill -0 "$_pid" 2>/dev/null; then
+        echo "fortivpn-session: teardown timed out, killing" >&2
+        kill -KILL "$_pid" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+}
+
+case "${1:-up}" in
+    up)     cmd_up ;;
+    down)   cmd_down ;;
+    status) cmd_status ;;
+    *)      die "unknown command: $1" ;;
+esac

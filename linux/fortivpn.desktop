@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=FortiGate VPN
+GenericName=VPN
+Comment=Connect to the company network over FortiGate SSL-VPN
+Exec=/usr/local/bin/fortivpn-gui
+Icon=network-vpn
+Terminal=false
+Categories=Network;System;
+Keywords=VPN;FortiGate;Forti;SSL;tunnel;work;office;
+StartupNotify=true

@@ -73,8 +73,19 @@ self-contained publish leave no choice.
 The plugin is Windows-only — its whole delivery mechanism is the Windows VPN Platform. For
 macOS and Linux there is a separate, self-written client under [src/Cli](src/Cli) that speaks
 the same SSL-VPN protocol, reusing this repo's own frame and 2FA core (`Ppp.cs`,
-`TwoFactor.cs`) and adding a tun/utun data plane. It needs `sudo` there — the
-no-administrator property is specific to Windows. See [docs/mac-linux.md](docs/mac-linux.md).
+`TwoFactor.cs`) and adding a tun/utun data plane.
+
+On a **Linux desktop** it is not a command-line tool in practice. Download
+`fortivpn-linux-x64.tar.gz` from the release and run the installer once:
+
+    tar xzf fortivpn-linux-x64.tar.gz
+    cd fortivpn && sudo ./install.sh
+
+That pins the gateway certificate for you and puts **FortiGate VPN** in your applications —
+click to connect, click to disconnect, no terminal and no `sudo` per connection. The parts
+that make that work live in [linux/](linux). Elsewhere it is `sudo fortivpn <gateway>`;
+opening a tunnel interface needs root there, so the no-administrator property is specific
+to Windows. See [docs/mac-linux.md](docs/mac-linux.md).
 
 ## Documentation
 

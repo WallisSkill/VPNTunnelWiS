@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+
+<!-- What lets the desktop icon work without a password prompt.
+
+     allow_active=yes reads as generous, and it is the same answer NetworkManager gives for
+     org.freedesktop.NetworkManager.network-control: the person physically logged in at this
+     machine may bring the configured VPN up and down. What keeps it contained is the helper
+     on the other end, not this file -- fortivpn-session accepts no gateway, no account and
+     no options from its caller, reading all of them from a root-owned config. So the power
+     granted here is "toggle this one tunnel", not "run something as root".
+
+     Anyone remote or on a switched-away session (allow_any / allow_inactive) still has to
+     authenticate as an administrator. -->
+<policyconfig>
+  <vendor>VPNTunnelWiS</vendor>
+  <vendor_url>https://github.com/WallisSkill/VPNTunnelWiS</vendor_url>
+
+  <action id="org.fortivpn.session">
+    <description>Control the FortiGate VPN connection</description>
+    <message>Authentication is required to control the FortiGate VPN connection</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/fortivpn-session</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
